@@ -1,3 +1,10 @@
+//! `ksud` 是 KernelSU 的用户态部分：负责安装和管理模块、通过 `supercall`
+//! ioctl 接口与内核驱动通信、执行 init 各阶段脚本，并提供兼容 Magisk 的
+//! `su`/`resetprop` 入口。
+//!
+//! 该程序同时面向 Android 与构建主机编译；主机版本只暴露安装器/CI 使用的
+//! 启动镜像修补命令。
+
 #![deny(clippy::all, clippy::pedantic)]
 #![warn(clippy::nursery)]
 #![allow(
@@ -11,6 +18,8 @@
     clippy::redundant_field_names
 )]
 
+// 启动镜像修补在所有目标平台都可用（主机上用于离线修补镜像），
+// 因此这些模块始终参与编译。
 mod apk_sign;
 mod assets;
 mod boot_patch;
@@ -68,6 +77,8 @@ mod utils;
 mod ksu_uapi;
 
 fn main() -> anyhow::Result<()> {
+    // Android 构建使用 `cli.rs` 中的完整命令行；主机构建只需要离线的
+    // 启动镜像修补命令。
     #[cfg(target_os = "android")]
     {
         cli::run()

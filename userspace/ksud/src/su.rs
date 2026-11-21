@@ -1,3 +1,11 @@
+//! 兼容 Magisk 的 `su` 实现。
+//!
+//! 应用执行 `/system/bin/su` 时，内核的 sucompat 钩子会把 exec 重定向到 ksud，
+//! 并令 `argv[0] == "su"`。此时内核已经判定调用者有权限并应用了对应 root
+//! 配置档案；本模块只负责解析熟悉的 su 选项并 exec 目标 shell。
+//!
+//! `grant_root` 是 `ksud debug su` 使用的简化路径。
+
 use crate::{
     defs, ksucalls,
     utils::{self, umask},
@@ -20,6 +28,9 @@ use rustix::{
     thread::{Gid, Uid, set_thread_res_gid, set_thread_res_uid},
 };
 
+/// `ksud debug su`：请求内核授予 root，然后 exec 一个 shell。
+///
+/// `global_mnt` 为真时 shell 运行在 init 的挂载命名空间中，等价于 `su -M`。
 pub fn grant_root(global_mnt: bool) -> Result<()> {
     crate::ksucalls::grant_root()?;
 
@@ -32,7 +43,7 @@ pub fn grant_root(global_mnt: bool) -> Result<()> {
             Result::Ok(())
         })
     };
-    // add /data/adb/ksu/bin to PATH
+    // 把 /data/adb/ksu/bin 加入 PATH
     add_path_to_env(defs::BINARY_DIR)?;
     Err(command.exec().into())
 }
@@ -42,6 +53,10 @@ fn print_usage(program: &str, opts: &Options) {
     print!("{}", opts.usage(&brief));
 }
 
+/// 切换到指定的 uid/gid 和附加组。
+///
+/// 这里进程是单线程的，因此使用线程级 rustix 调用；setres* 会同时修改三个
+/// uid，确保 shell 无法重新获得 root。
 fn set_identity(uid: u32, gid: u32, groups: &[u32]) -> Result<()> {
     rustix::thread::set_thread_groups(
         groups
@@ -58,6 +73,7 @@ fn set_identity(uid: u32, gid: u32, groups: &[u32]) -> Result<()> {
     Ok(())
 }
 
+/// 解析 `su` 的用户参数：passwd 中的用户名或数字 uid。
 fn resolve_uid(user: &str) -> Result<u32> {
     let c_user = CString::new(user).with_context(|| format!("Invalid user: {user}"))?;
     let pw = unsafe { libc::getpwnam(c_user.as_ptr()).as_ref() };
@@ -75,6 +91,10 @@ fn set_selinux_context(context: &str) -> Result<()> {
     Ok(())
 }
 
+/// 用内核提供的同号包装 fd 替换标准输入输出 fd。
+///
+/// root 配置档案可能禁止对原终端调用 `isatty`；内核包装 fd 能绕过该限制，
+/// 为 shell 恢复可用的 tty。
 fn wrap_tty(fd: c_int) {
     let inner_fn = move || -> Result<()> {
         if unsafe { libc::isatty(fd) != 1 }
@@ -83,10 +103,9 @@ fn wrap_tty(fd: c_int) {
             return Ok(());
         }
 
-        // The root profile is already active here, so its SELinux domain may
-        // return EACCES while querying the original terminal. In that case,
-        // check the wrapped fd instead, since that descriptor is intended to
-        // bypass this restriction.
+        // 此时 root 档案已经生效，它的 SELinux 域在查询原终端时可能
+        // 返回 EACCES。这种情况下改为检查包装后的 fd，因为该描述符
+        // 正是用来绕过这一限制的。
         let new_fd = get_wrapped_fd(fd).context("get_wrapped_fd")?;
         if unsafe { libc::isatty(new_fd) != 1 } {
             unsafe { libc::close(new_fd) };
@@ -106,19 +125,26 @@ fn wrap_tty(fd: c_int) {
     }
 }
 
+/// `argv[0] == "su"` 时的入口：解析选项并 exec shell。
+///
+/// 关键在参数归一化。getopts 不支持 GNU 风格的选项合并（`-cn`、`-mm`），
+/// 也不支持 `su user -c cmd` 这种顺序，因此解析前会先重写原始 argv。
 #[allow(clippy::similar_names)]
 pub fn root_shell() -> Result<()> {
-    // The kernel has already applied the selected root profile.
+    // 内核已经应用了所选的 root 档案。
 
-    // A su-session driver fd deliberately survives the exec into ksud. Claim
-    // it before handling any arguments and restore FD_CLOEXEC so it cannot
-    // leak into the target shell, including when fd wrapping is disabled.
+    // su 会话的 driver fd 会刻意在 exec 进入 ksud 后继续存在。
+    // 在处理任何参数之前先认领它，并恢复 FD_CLOEXEC，防止它
+    // 泄漏到目标 shell，包括在禁用 fd 包装的情况下。
     ksucalls::claim_inherited_driver_fd().context("claim inherited KernelSU driver fd")?;
 
     let env_args: Vec<String> = env::args().collect();
     let program = env_args[0].clone();
     let mut executable: Option<String> = None;
     let mut exec_args: Option<Vec<String>> = None;
+    // 定位 `-c` 以及第一个位置参数（即可能的登录用户）。
+    // `su [options] [-] [user [argument...]]` 允许用户出现在 `-c` 前后，
+    // 下面会把两种形式都归一化。
     let first_option_c = env_args
         .iter()
         .position(|arg| arg == "-c")
@@ -138,6 +164,8 @@ pub fn root_shell() -> Result<()> {
                     || arg[0] == "--context=")
         })
         .map_or(usize::MAX, |idx| idx + 1);
+    // 不带 -c 的 `user command...` 直接 exec `command`；带 -c 且后面还有
+    // 参数时，把这些参数重新拼成一个 shell 命令字符串。
     let args = match first_non_option.cmp(&first_option_c) {
         Ordering::Equal => env_args,
         Ordering::Less => {
@@ -198,7 +226,7 @@ pub fn root_shell() -> Result<()> {
     );
     opts.optopt("Z", "context", "Specify the SELinux context", "CONTEXT");
 
-    // Replace -cn with -z, -mm with -M for supporting getopt_long
+    // 把 -cn 替换为 -z，把 -mm 替换为 -M，以兼容 getopt_long
     let args = args
         .into_iter()
         .map(|e| {
@@ -252,24 +280,25 @@ pub fn root_shell() -> Result<()> {
         .map(|g| g.parse::<u32>().map_err(|_| anyhow!("Invalid GID: {g}")))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // if -g provided, use it.
+    // 如果提供了 -g，就使用它。
     let mut gid = matches
         .opt_str("g")
         .map(|g| g.parse::<u32>().map_err(|_| anyhow!("Invalid GID: {g}")))
         .transpose()?;
 
-    // otherwise, use the first gid of groups.
+    // 否则使用 groups 中的第一个 gid。
     if gid.is_none() && !groups.is_empty() {
         gid = Some(groups[0]);
     }
 
-    // we've make sure that -c is the last option and it already contains the whole command, no need to construct it again
+    // 已确保 -c 是最后一个选项且已包含完整命令，无需再次构造
     let args = exec_args.unwrap_or_else(|| {
         matches
             .opt_str("c")
             .map_or_else(Vec::new, |cmd| vec!["-c".to_string(), cmd])
     });
 
+    // 第一个位置参数为单独的 "-" 时表示登录 shell。
     let mut free_idx = 0;
     if !matches.free.is_empty() && matches.free[free_idx] == "-" {
         is_login = true;
@@ -278,14 +307,14 @@ pub fn root_shell() -> Result<()> {
 
     let identity_requested = free_idx < matches.free.len() || gid.is_some() || !groups.is_empty();
 
-    // use current uid if no user specified, these has been done in kernel!
+    // 未指定用户时使用当前 uid，这部分已由内核完成！
     let uid = if free_idx < matches.free.len() {
         resolve_uid(&matches.free[free_idx])?
     } else {
         getuid().as_raw()
     };
 
-    // if there is no gid provided, use uid.
+    // 未提供 gid 时使用 uid。
     let gid = gid.unwrap_or(uid);
     let executable = executable.as_ref().unwrap_or(&shell);
     // https://github.com/topjohnwu/Magisk/blob/master/native/src/su/su_daemon.cpp#L408
@@ -294,9 +323,8 @@ pub fn root_shell() -> Result<()> {
     let mut command = Command::new(executable);
 
     if !preserve_env {
-        // This is actually incorrect, i don't know why.
-        // command = command.env_clear();
-
+        // Magisk 保留继承的环境而不调用 env_clear()，shell 依赖这一行为；
+        // 这里只覆盖登录身份相关的变量。
         let pw = unsafe { libc::getpwuid(uid).as_ref() };
 
         if let Some(pw) = pw {
@@ -314,10 +342,10 @@ pub fn root_shell() -> Result<()> {
         }
     }
 
-    // add /data/adb/ksu/bin to PATH
+    // 把 /data/adb/ksu/bin 加入 PATH
     add_path_to_env(defs::BINARY_DIR)?;
 
-    // when KSURC_PATH exists and ENV is not set, set ENV to KSURC_PATH
+    // KSURC_PATH 存在且未设置 ENV 时，把 ENV 设为 KSURC_PATH
     if PathBuf::from(defs::KSURC_PATH).exists() && env::var("ENV").is_err() {
         command.env("ENV", defs::KSURC_PATH);
     }
@@ -326,15 +354,15 @@ pub fn root_shell() -> Result<()> {
         ksucalls::set_ksu_no_new_privs().context("set KSU_NO_NEW_PRIVS")?;
     }
 
-    // escape from the current cgroup and become session leader
-    // WARNING!!! This cause some root shell hang forever!
+    // 脱离 cgroup 并成为会话首进程会让部分 root shell 永久卡住，
+    // 因此这里刻意不启用 process_group(0)。
     // command = command.process_group(0);
 
     command.args(args).arg0(arg0);
     umask(0o22);
     utils::switch_cgroups();
 
-    // switch to global mount namespace
+    // 切换到全局挂载命名空间
     if mount_master {
         let _ = utils::switch_mnt_ns(1);
     }
@@ -354,6 +382,7 @@ pub fn root_shell() -> Result<()> {
     Err(command.exec().into())
 }
 
+/// 把 `path` 追加到 `PATH`（针对单次 shell 初始化，简单去重即可）。
 fn add_path_to_env(path: &str) -> Result<()> {
     let mut paths =
         env::var_os("PATH").map_or(Vec::new(), |val| env::split_paths(&val).collect::<Vec<_>>());

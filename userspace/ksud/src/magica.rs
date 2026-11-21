@@ -1,3 +1,10 @@
+//! Magica：通过 ADB root 引导一次晚加载。
+//!
+//! 当 ksud 只拿到 Magica 应用授予的受限 root 时，无法自行加载内核模块。该模块会临时打开
+//! adb root 和 TCP 端口，连接本机 adbd，再通过 ADB shell 重新执行
+//! `ksud late-load --post-magica`，使子进程获得完整 root 上下文。子进程加载 kernelsu.ko 后
+//! 会恢复 adb 属性。
+
 use adb_client::ADBDeviceExt;
 use adb_client::tcp::ADBTcpDevice;
 use anyhow::{Context, Result, bail};
@@ -7,6 +14,10 @@ use prop_rs_android::sys_prop;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::Command;
 
+/// 本模块所有属性写入共用的 ResetProp 配置。
+///
+/// 改动只留在内存中（不写入持久化文件），并通过 `skip_svc` 直接写入属性区，
+/// 而不是经过 property_service；adbd 会在后面显式重启。
 const fn resetprop() -> ResetProp {
     ResetProp {
         skip_svc: true,
@@ -18,6 +29,9 @@ const fn resetprop() -> ResetProp {
     }
 }
 
+/// 依次执行外部命令，任一命令失败就终止。
+///
+/// chmod/setprop 是独立可执行文件，必须显式检查退出状态，不能依赖 ioctl 或库调用的错误。
 fn exec_shell_commands(commands: &[(&str, &[&str])], log_prefix: &str) -> Result<()> {
     for (cmd, args) in commands {
         info!("{log_prefix}: {cmd} {}", args.join(" "));
@@ -32,8 +46,13 @@ fn exec_shell_commands(commands: &[(&str, &[&str])], log_prefix: &str) -> Result
     Ok(())
 }
 
+/// 打开 adb root 和 adbd 的 TCP 监听，以便通过 adbd 执行完整 root 的命令。
+///
+/// 此时只有 Magica 授予的受限 root，足以 chmod 属性文件，但用不了内核侧能力。
+/// /dev/__properties__ 下的属性文件默认是 0444 并受 SELinux 保护，必须先改成可写，
+/// resetprop 才能修改它们。
 fn enable_adb_root(port: u16) -> Result<()> {
-    // We are in limited root by magica
+    // 此时由 magica 授予的只是受限 root
     anyhow::ensure!(
         rustix::process::getuid().as_raw() == 0,
         "must be run as root"
@@ -42,6 +61,7 @@ fn enable_adb_root(port: u16) -> Result<()> {
     sys_prop::init().context("Failed to initialize system property API")?;
     let rp = resetprop();
 
+    // 属性上下文名同时也是 /dev/__properties__ 下对应文件的文件名。
     let debuggable_context = sys_prop::get_context("ro.debuggable")
         .context("Failed to get context for ro.debuggable")?;
     info!("ro.debuggable context: {debuggable_context}");
@@ -55,7 +75,8 @@ fn enable_adb_root(port: u16) -> Result<()> {
     let adb_secure_context = format!("/dev/__properties__/{adb_secure_context}");
     let port_str = port.to_string();
 
-    // chmod property files to writable
+    // 把属性文件 chmod 为可写
+    // 也要改 properties_serial：写入属性时会更新这个序号计数器。
     exec_shell_commands(
         &[
             ("chmod", &["0644", props_serial]),
@@ -65,7 +86,7 @@ fn enable_adb_root(port: u16) -> Result<()> {
         "Executing",
     )?;
 
-    // Set properties via internal API
+    // 通过内部 API 设置属性
     rp.set("ro.debuggable", "1")
         .context("Failed to set ro.debuggable")?;
     info!("Executing: resetprop -n ro.debuggable 1");
@@ -73,7 +94,9 @@ fn enable_adb_root(port: u16) -> Result<()> {
         .context("Failed to set ro.adb.secure")?;
     info!("Executing: resetprop -n ro.adb.secure 0");
 
-    // Restore permissions and restart adbd
+    // 恢复权限并重启 adbd
+    // 当 ro.adb.secure 关闭且设置了 service.adb.root 时，adbd 会以 root 重新执行；
+    // ctl.restart 必须最后写，才能同时带上这两个属性。
     exec_shell_commands(
         &[
             ("chmod", &["0444", props_serial]),
@@ -89,8 +112,12 @@ fn enable_adb_root(port: u16) -> Result<()> {
     Ok(())
 }
 
+/// 内核模块加载完成后，撤销 `enable_adb_root` 所做的改动。
+///
+/// 此时已是完整 root，属性文件不再需要 chmod；删除 adb 属性并重启 adbd 就能让 adbd 回到
+/// 正常模式。
 pub fn disable_adb_root() -> Result<()> {
-    // We have full root now, no need to chmod
+    // 现在已是完整 root，无需再 chmod
     sys_prop::init().context("Failed to initialize system property API")?;
     let rp = resetprop();
 
@@ -108,6 +135,8 @@ pub fn disable_adb_root() -> Result<()> {
         "ro.boot.selinux",
     ] {
         info!("Restoring: resetprop --delete {prop}");
+        // 这些属性可能不存在（也可能由漏洞利用设置过）；忽略删除失败，并重建属性区，
+        // 让新读者能看到删除结果。
         let _ = rp.delete(prop);
         if let Ok(ctx) = sys_prop::get_context(prop) {
             let _ = rp.rebuild(&ctx);
@@ -119,6 +148,9 @@ pub fn disable_adb_root() -> Result<()> {
     Ok(())
 }
 
+/// 连接刚重启的 adbd（本机回环地址）。
+///
+/// adbd 退出再以 root 身份启动需要一点时间，因此这里最多重试约 30 秒再放弃 Magica 路径。
 fn connect_to_device(port: u16) -> Result<ADBTcpDevice> {
     const MAX_RETRIES: u32 = 30;
     for attempt in 1..=MAX_RETRIES {
@@ -137,17 +169,22 @@ fn connect_to_device(port: u16) -> Result<ADBTcpDevice> {
     bail!("Failed to connect to ADB device after {MAX_RETRIES} attempts")
 }
 
+/// `ksud late-load --magica <port>` 的入口。
+///
+/// 打开 adb root 后通过 ADB shell 驱动真正的加载；shell 失败只作为提示信息，因为派生的
+/// late-load 守护进程会脱离会话，即使加载成功，shell 连接也常常提前断开。
 pub fn run(port: u16, package_name: &String, allow_shell: bool) -> Result<()> {
     enable_adb_root(port)?;
 
     let mut device = connect_to_device(port)?;
 
+    // 使用自身二进制，保证子进程运行同一版本的 ksud 和相同参数。
     let self_path = std::env::current_exe().context("Failed to get self exe path")?;
 
-    // Execute late-load with --post-magica via adb shell.
-    // The late-load process has full root + su domain and will:
-    // 1. Load kernelsu.ko, enforce SELinux, run stage scripts
-    // 2. Restore adb properties (disable adb root/tcp mode)
+    // 通过 adb shell 执行带 --post-magica 的 late-load。
+    // late-load 进程拥有完整 root 和 su 域，将会：
+    // 1. 加载 kernelsu.ko、强制实施 SELinux、运行阶段脚本
+    // 2. 恢复 adb 属性（关闭 adb root/tcp 模式）
     let allow_shell_arg = if allow_shell { " --allow-shell" } else { "" };
     let cmd = format!(
         "{} late-load --post-magica --package-name {}{}",
@@ -158,6 +195,7 @@ pub fn run(port: u16, package_name: &String, allow_shell: bool) -> Result<()> {
     info!("Executing '{cmd}' via adb shell...");
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    // 这里故意不检查 shell 的退出状态，原因见函数文档。
     if let Err(e) = device.shell_command(&cmd, Some(&mut stdout), Some(&mut stderr)) {
         info!("adb shell finished with error (may be expected): {e}");
     }

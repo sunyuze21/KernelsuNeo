@@ -34,31 +34,28 @@ fn get_git_version() -> Result<(u32, String), std::io::Error> {
 }
 
 fn configure_bindgen() {
-    // The bindgen::Builder is the main entry point
-    // to bindgen, and lets you build up options for
-    // the resulting bindings.
+    // bindgen::Builder 是 bindgen 的主要入口，
+    // 用于逐步构建生成绑定所需的选项。
     let mut builder = bindgen::Builder::default()
-        // The input header we would like to generate
-        // bindings for.
+        // 需要为其生成绑定的输入头文件。
         .header("src/ksu_uapi.h")
         .clang_args(["-x", "c++", "-I../../"])
-        // Tell cargo to invalidate the built crate whenever any of the
-        // included header files changed.
+        // 当任何被包含的头文件发生变化时，通知 cargo 使已构建的 crate 失效。
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
     if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("riscv64") {
-        // libc does not yet expose Android's RISC-V signal context. Generate
-        // it from the target NDK rather than assuming another libc's layout.
+        // libc 尚未暴露 Android 的 RISC-V 信号上下文，因此改为从目标 NDK
+        // 生成，而不是假定为其他 libc 的布局。
         builder = builder.header_contents("ksu_signal_context.h", "#include <sys/ucontext.h>");
     }
     let bindings = builder
-        // Finish the builder and generate the bindings.
+        // 完成 builder 并生成绑定。
         .generate()
-        // Unwrap the Result and panic on failure.
+        // 解包 Result，失败时 panic。
         .expect("Unable to generate bindings");
 
-    // Write the bindings to the $OUT_DIR/bindings.rs file.
+    // 将绑定写入 $OUT_DIR/bindings.rs 文件。
     let out_path = std::path::PathBuf::from(env::var("OUT_DIR").unwrap());
-    // for debug, uncomment below
+    // 调试时取消下面一行的注释
     // let out_path = std::path::PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     bindings
         .write_to_file(out_path.join("bindings.rs"))
@@ -149,7 +146,7 @@ fn assemble_bootstrap() {
         return;
     }
 
-    // cross builds prepare this file on the host before entering the container.
+    // 交叉构建会在进入容器之前于宿主机上准备好此文件。
     let prepared = manifest.join(PREPARED_BOOTSTRAP_OBJECT);
     println!("cargo:rerun-if-changed={}", prepared.display());
     if prepared.is_file() {
@@ -228,7 +225,7 @@ fn main() {
     let (code, name) = match get_git_version() {
         Ok((code, name)) => (code, name),
         Err(_) => {
-            // show warning if git is not installed
+            // 未安装 git 时输出警告
             println!("cargo:warning=Failed to get git version, using 0.0.0");
             (0, "0.0.0".to_string())
         }

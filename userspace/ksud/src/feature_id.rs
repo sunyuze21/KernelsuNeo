@@ -1,9 +1,16 @@
-//! Feature ids shared by the feature manager and boot-patch (which also runs on the host).
+//! 特性 id 由特性管理器和 boot-patch（后者也会在主机上运行）共用。
+//!
+//! 数值是 ksud/内核契约的一部分：它们会通过 feature supercall 发送并存入
+//! 持久化配置，因此绝不能重新编号。名称是 CLI 命令和模块
+//! `manage.<feature>=true` 声明使用的稳定标识。
 
 #![cfg_attr(not(target_os = "android"), allow(dead_code))]
 
 use anyhow::{Result, bail};
 
+/// 当前版本已知的特性标识。
+///
+/// `repr(u32)` 使判别值成为内核 supercall 的线上格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum FeatureId {
@@ -12,11 +19,12 @@ pub enum FeatureId {
     Sulog = 2,
     AdbRoot = 3,
     SelinuxHide = 4,
-    // 5 was webview_zygote_umount (v3.3.0), keep it unused so stale configs don't apply
+    // 5 曾是 webview_zygote_umount（v3.3.0），保留为未使用，以免旧配置被误用
     ShellSuAdbOnly = 6,
 }
 
 impl FeatureId {
+    /// 按展示顺序排列的所有特性；未使用的 id 不列入。
     pub const ALL: [Self; 6] = [
         Self::SuCompat,
         Self::KernelUmount,
@@ -26,6 +34,8 @@ impl FeatureId {
         Self::ShellSuAdbOnly,
     ];
 
+    /// 将线上 id 映射到已知特性；退役或未知 id（尤其是 5）返回 `None`，
+    /// 以便调用方原样透传。
     pub const fn from_u32(id: u32) -> Option<Self> {
         match id {
             0 => Some(Self::SuCompat),
@@ -38,6 +48,9 @@ impl FeatureId {
         }
     }
 
+    /// 配置、CLI 参数和模块声明中使用的稳定标识。
+    ///
+    /// 重命名会破坏现有模块，请视为 API。
     pub const fn name(self) -> &'static str {
         match self {
             Self::SuCompat => "su_compat",
@@ -49,6 +62,7 @@ impl FeatureId {
         }
     }
 
+    /// 特性 CLI 命令展示的人类可读说明。
     pub const fn description(self) -> &'static str {
         match self {
             Self::SuCompat => {
@@ -71,6 +85,11 @@ impl FeatureId {
     }
 }
 
+/// 把特性名称或其十进制 id 解析为已知的 `FeatureId`。
+///
+/// 接受数字形式，便于脚本使用内核 UAPI 中的 id。可接受的集合必须与
+/// `FeatureId::from_u32` 保持一致；id 5 会被拒绝，因为它已退役，
+/// 不能写回配置。
 pub fn parse_feature_id(name: &str) -> Result<FeatureId> {
     match name {
         "su_compat" | "0" => Ok(FeatureId::SuCompat),

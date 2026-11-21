@@ -1,3 +1,9 @@
+//! 运行期 SELinux 策略热修补。
+//!
+//! ksud 解析策略语言的一个子集（模块 `sepolicy.rule`、每包 profile 片段），把 `{a b}` 这类语句
+//! 展开成原子命令，再通过一次 supercall 把整批规则交给内核；内核复制内存策略、应用后整体替换。
+//! 应用规则时使用宽松模式，只有 `sepolicy check` 使用严格模式，避免一行坏规则中断开机整批处理。
+
 use anyhow::{Context, Result, bail};
 use derive_new::new;
 use nom::{
@@ -9,16 +15,22 @@ use nom::{
 };
 use std::{path::Path, vec};
 
+/// 一个或多个策略对象名：单个词、`{a b c}` 或 `*` 展开后的结果。
 type SeObject<'a> = Vec<&'a str>;
 
+/// 策略词中允许的字符。其他字符（引号、冒号、点号等）一律拒绝，而不是原样传给内核。
 fn is_sepolicy_char(c: char) -> bool {
     c.is_alphanum() || c == '_' || c == '-'
 }
 
+/// 单个裸词，用于不允许列表的位置（类型名、class 等）。
 fn parse_single_word(input: &str) -> IResult<&str, &str> {
     take_while1(is_sepolicy_char).parse(input)
 }
 
+/// 解析 `{ obj1 obj2 ... }` 集合。
+///
+/// 1..100 字符的上限用于防止畸形文件吞掉后面的全部输入；按空白切分后调用方仍要求至少有一个词。
 fn parse_bracket_objs(input: &str) -> IResult<&str, SeObject<'_>> {
     let (input, (_, words, _)) = (
         tag("{"),
@@ -36,35 +48,41 @@ fn parse_bracket_objs(input: &str) -> IResult<&str, SeObject<'_>> {
     Ok((input, objs))
 }
 
+/// 解析单个对象名并包装成单元素列表。
 fn parse_single_obj(input: &str) -> IResult<&str, SeObject<'_>> {
     let (input, word) = take_while1(is_sepolicy_char).parse(input)?;
     Ok((input, vec![word]))
 }
 
+/// 解析通配符 `*`，内核收到空串时会把它当作 ALL。
 fn parse_star(input: &str) -> IResult<&str, SeObject<'_>> {
     let (input, _) = tag("*").parse(input)?;
     Ok((input, vec!["*"]))
 }
 
-// 1. a single sepolicy word
-// 2. { obj1 obj2 obj3 ...}
-// 3. *
+// 1. 单个 sepolicy 词
+// 2. 集合形式：{ obj1 obj2 obj3 ...}
+// 3. 通配符 *
+/// 解析一个策略对象参数：单词、集合或通配符。
 fn parse_seobj(input: &str) -> IResult<&str, SeObject<'_>> {
     let (input, strs) = alt((parse_single_obj, parse_bracket_objs, parse_star)).parse(input)?;
     Ok((input, strs))
 }
 
+/// 同上，但不接受 `*`；类型状态、类型属性等位置不允许通配。
 fn parse_seobj_no_star(input: &str) -> IResult<&str, SeObject<'_>> {
     let (input, strs) = alt((parse_single_obj, parse_bracket_objs)).parse(input)?;
     Ok((input, strs))
 }
 
+/// 每种语句共用的一步解析接口，把 nom 的解析器统一到 `Self::parse` 上。
 trait SeObjectParser<'a> {
     fn parse(input: &'a str) -> IResult<&'a str, Self>
     where
         Self: Sized;
 }
 
+/// `allow`/`deny`/`auditallow`/`dontaudit` 语句：源、目标、class 和权限都可以是列表。
 #[derive(Debug, PartialEq, Eq, new)]
 struct NormalPerm<'a> {
     op: &'a str,
@@ -74,6 +92,7 @@ struct NormalPerm<'a> {
     perm: SeObject<'a>,
 }
 
+/// `allowxperm` 系列：在普通权限之外多一个 ioctl 操作名。
 #[derive(Debug, PartialEq, Eq, new)]
 struct XPerm<'a> {
     op: &'a str,
@@ -84,29 +103,34 @@ struct XPerm<'a> {
     perm_set: SeObject<'a>,
 }
 
+/// `permissive`/`enforce`：切换一个或多个类型的强制模式。
 #[derive(Debug, PartialEq, Eq, new)]
 struct TypeState<'a> {
     op: &'a str,
     stype: SeObject<'a>,
 }
 
+/// `typeattribute`/`attradd`：把类型加入属性。
 #[derive(Debug, PartialEq, Eq, new)]
 struct TypeAttr<'a> {
     stype: SeObject<'a>,
     sattr: SeObject<'a>,
 }
 
+/// `type`：声明一个新类型及其属性。
 #[derive(Debug, PartialEq, Eq, new)]
 struct Type<'a> {
     name: &'a str,
     attrs: SeObject<'a>,
 }
 
+/// `attribute`：声明一个属性。
 #[derive(Debug, PartialEq, Eq, new)]
 struct Attr<'a> {
     name: &'a str,
 }
 
+/// `type_transition`/`name_transition`：目标对象上的自动类型转换。
 #[derive(Debug, PartialEq, Eq, new)]
 struct TypeTransition<'a> {
     source: &'a str,
@@ -116,6 +140,7 @@ struct TypeTransition<'a> {
     object_name: Option<&'a str>,
 }
 
+/// `type_change`/`type_member`：重新标记已有对象时的类型规则。
 #[derive(Debug, PartialEq, Eq, new)]
 struct TypeChange<'a> {
     op: &'a str,
@@ -125,6 +150,7 @@ struct TypeChange<'a> {
     default_type: &'a str,
 }
 
+/// `genfscon`：为伪文件系统路径指定固定 context。
 #[derive(Debug, PartialEq, Eq, new)]
 struct GenFsCon<'a> {
     fs_name: &'a str,
@@ -132,6 +158,7 @@ struct GenFsCon<'a> {
     fs_context: &'a str,
 }
 
+/// 一条已解析的策略语句；变体与内核支持的 sepolicy 命令一一对应。
 #[derive(Debug)]
 enum PolicyStatement<'a> {
     // "allow *source_type *target_type *class *perm_set"
@@ -231,12 +258,14 @@ impl<'a> SeObjectParser<'a> for TypeState<'a> {
 
 impl<'a> SeObjectParser<'a> for Type<'a> {
     fn parse(input: &'a str) -> IResult<&'a str, Self> {
+        // `tag("type")` 也会匹配到 `typeattribute`/`type_transition` 的开头，但紧跟的 `space1`
+        // 会因下划线而失败，于是 alt 会继续尝试后面的解析器。
         let (input, _) = tag("type")(input)?;
         let (input, _) = space1(input)?;
         let (input, name) = parse_single_word(input)?;
 
         if input.is_empty() {
-            return Ok((input, Type::new(name, vec!["domain"]))); // default to domain
+            return Ok((input, Type::new(name, vec!["domain"]))); // 默认为 domain
         }
 
         let (input, _) = space1(input)?;
@@ -280,6 +309,7 @@ impl<'a> SeObjectParser<'a> for TypeTransition<'a> {
         let (input, _) = space1(input)?;
         let (input, default) = parse_single_word(input)?;
 
+        // 对象名是可选的：语句到此结束就表示没有对象名。
         if input.is_empty() {
             return Ok((
                 input,
@@ -330,8 +360,11 @@ impl<'a> SeObjectParser<'a> for GenFsCon<'a> {
 }
 
 impl<'a> PolicyStatement<'a> {
+    /// 解析一条语句，允许前后空白和结尾分号。
     fn parse(input: &'a str) -> IResult<&'a str, Self> {
         let (input, _) = space0(input)?;
+        // 顺序很关键：`allow` 先于 `allowxperm`、`type` 先于 `typeattribute` 尝试，靠的都是关键字
+        // 后面必须紧跟空白，因此前缀相同的语句不会互相吞掉。
         let (input, statement) = alt((
             map(NormalPerm::parse, PolicyStatement::NormalPerm),
             map(XPerm::parse, PolicyStatement::XPerm),
@@ -345,12 +378,18 @@ impl<'a> PolicyStatement<'a> {
         ))
         .parse(input)?;
         let (input, _) = space0(input)?;
+        // 允许语句末尾带一个或多个分号。
         let (input, _) = take_while(|c| c == ';')(input)?;
         let (input, _) = space0(input)?;
         Ok((input, statement))
     }
 }
 
+/// 把整段策略文本解析成语句列表。
+///
+/// 同时按换行和分号切分，因此两种书写风格都能接受；空行和 `#` 注释会被跳过。`strict` 为真时
+/// 无法解析的行直接报错（`sepolicy check` 使用），否则该行被静默丢弃（应用模块规则时使用，
+/// 避免一行坏规则中断整批）。
 fn parse_sepolicy<'a, 'b>(input: &'b str, strict: bool) -> Result<Vec<PolicyStatement<'a>>>
 where
     'b: 'a,
@@ -371,16 +410,21 @@ where
     Ok(statements)
 }
 
+/// 内核命令中一个参数槽的编码形式。
 #[derive(Debug, Default)]
 enum PolicyObject {
+    /// 通配符，序列化为空串；内核把空串解释为 ALL。
     All,
+    /// 普通名字，按字节序列化。
     One(Vec<u8>),
+    /// 该槽位不使用，同样序列化为空串。
     #[default]
     None,
 }
 
 impl TryFrom<&str> for PolicyObject {
     type Error = anyhow::Error;
+    /// 拒绝 NUL，因为内核按 C 字符串解析这些参数。
     fn try_from(s: &str) -> Result<Self> {
         anyhow::ensure!(!s.as_bytes().contains(&0), "policy object contains NUL");
         if s == "*" {
@@ -390,9 +434,9 @@ impl TryFrom<&str> for PolicyObject {
     }
 }
 
-/// atomic statement, such as: allow domain1 domain2:file1 read;
-/// normal statement would be expand to atomic statement, for example:
-/// allow domain1 domain2:file1 { read write }; would be expand to two atomic statement
+/// 原子语句，例如：allow domain1 domain2:file1 read;
+/// 普通语句会被展开为原子语句，例如：
+/// allow domain1 domain2:file1 { read write }; 会展开为两条原子语句
 /// allow domain1 domain2:file1 read;allow domain1 domain2:file1 write;
 #[allow(clippy::too_many_arguments)]
 #[derive(Debug, new)]
@@ -412,6 +456,7 @@ impl<'a> TryFrom<&'a NormalPerm<'a>> for Vec<AtomicStatement> {
     type Error = anyhow::Error;
     fn try_from(perm: &'a NormalPerm<'a>) -> Result<Self> {
         let mut result = vec![];
+        // 下划线分支只是兜底：解析器只会产生上面四种 op。
         let subcmd = match perm.op {
             "allow" => crate::ksu_uapi::KSU_SEPOLICY_SUBCMD_NORMAL_PERM_ALLOW,
             "deny" => crate::ksu_uapi::KSU_SEPOLICY_SUBCMD_NORMAL_PERM_DENY,
@@ -419,6 +464,7 @@ impl<'a> TryFrom<&'a NormalPerm<'a>> for Vec<AtomicStatement> {
             "dontaudit" => crate::ksu_uapi::KSU_SEPOLICY_SUBCMD_NORMAL_PERM_DONTAUDIT,
             _ => 0,
         };
+        // 对列表参数做笛卡尔积展开，每条原子语句只携带一个具体对象。
         for &s in &perm.source {
             for &t in &perm.target {
                 for &c in &perm.class {
@@ -645,6 +691,10 @@ impl<'a> TryFrom<&'a PolicyStatement<'a>> for Vec<AtomicStatement> {
     }
 }
 
+/// 每种命令在线上格式中携带的参数个数。
+///
+/// 必须与内核 `sepol_expected_argc` 完全一致；它决定 `AtomicStatement` 的七个槽位中前几个会被
+/// 序列化。
 const fn cmd_expected_argc(cmd: u32) -> Option<usize> {
     match cmd {
         crate::ksu_uapi::KSU_SEPOLICY_CMD_NORMAL_PERM
@@ -662,6 +712,9 @@ const fn cmd_expected_argc(cmd: u32) -> Option<usize> {
     }
 }
 
+/// 按内核的线上格式写一个参数：u32 本机字节序长度、原始字节、结尾 NUL。
+///
+/// `None` 和 `All` 都编码成长度 0，内核读到空串会把它当作 ALL，这与 libsepol 的约定一致。
 fn encode_policy_object(payload: &mut Vec<u8>, object: &PolicyObject) -> Result<()> {
     let bytes = match object {
         PolicyObject::None | PolicyObject::All => &[][..],
@@ -671,11 +724,13 @@ fn encode_policy_object(payload: &mut Vec<u8>, object: &PolicyObject) -> Result<
     let len = u32::try_from(bytes.len()).context("policy object too long to encode")?;
     payload.extend_from_slice(&len.to_ne_bytes());
     payload.extend_from_slice(bytes);
+    // 内核要求字符串以 NUL 结尾，且 NUL 不计入 len。
     payload.push(0);
 
     Ok(())
 }
 
+/// 写一条原子语句：命令头（cmd、subcmd）加上该命令所需的参数。
 fn append_atomic_statement(payload: &mut Vec<u8>, statement: &AtomicStatement) -> Result<()> {
     let expected_argc = cmd_expected_argc(statement.cmd)
         .ok_or_else(|| anyhow::anyhow!("unknown sepolicy cmd {}", statement.cmd))?;
@@ -693,6 +748,7 @@ fn append_atomic_statement(payload: &mut Vec<u8>, statement: &AtomicStatement) -
         &statement.sepol7,
     ];
 
+    // 内核只按命令读取固定数量的参数，多余的槽位不发送。
     for object in args.iter().take(expected_argc) {
         encode_policy_object(payload, object)?;
     }
@@ -700,6 +756,7 @@ fn append_atomic_statement(payload: &mut Vec<u8>, statement: &AtomicStatement) -
     Ok(())
 }
 
+/// 把整批原子语句序列化成一个连续的 payload。
 fn serialize_atomic_statements(statements: &[AtomicStatement]) -> Result<Vec<u8>> {
     let mut payload = vec![];
     for statement in statements {
@@ -708,6 +765,9 @@ fn serialize_atomic_statements(statements: &[AtomicStatement]) -> Result<Vec<u8>
     Ok(payload)
 }
 
+/// 把语句列表展开成按顺序排列的原子语句列表。
+///
+/// 这里的 `?` 意味着某条语句无法转换（例如参数含 NUL）时整批都会失败。
 fn flatten_atomic_statements<'a>(
     statements: &'a [PolicyStatement<'a>],
 ) -> Result<Vec<AtomicStatement>> {
@@ -719,6 +779,10 @@ fn flatten_atomic_statements<'a>(
     Ok(policies)
 }
 
+/// 用一次 supercall 应用整批规则。
+///
+/// 内核返回成功应用的命令数；`strict` 决定部分成功或调用失败时是否算错误。非严格模式用于
+/// 开机流程，保证一条坏规则不会让整批（乃至开机）失败。
 fn apply_rules_batch<'a>(statements: &'a [PolicyStatement<'a>], strict: bool) -> Result<()> {
     let policies = flatten_atomic_statements(statements)?;
     if policies.is_empty() {
@@ -729,6 +793,7 @@ fn apply_rules_batch<'a>(statements: &'a [PolicyStatement<'a>], strict: bool) ->
 
     match crate::ksucalls::set_sepolicy(payload.as_ptr(), payload.len() as u64) {
         Ok(applied_count) => {
+            // 内核用负数错误码表示失败，转成 usize 失败即说明这一点。
             let applied_count = usize::try_from(applied_count)
                 .context("kernel returned negative sepolicy applied count")?;
             if applied_count < policies.len() {
@@ -753,6 +818,9 @@ fn apply_rules_batch<'a>(statements: &'a [PolicyStatement<'a>], strict: bool) ->
     Ok(())
 }
 
+/// 解析并应用一段内联策略文本，宽松模式。
+///
+/// 解析出的语句会先打印到 stdout 便于调试，然后整批提交给内核。
 pub fn live_patch(policy: &str) -> Result<()> {
     let result = parse_sepolicy(policy.trim(), false)?;
     for statement in &result {
@@ -762,11 +830,16 @@ pub fn live_patch(policy: &str) -> Result<()> {
     Ok(())
 }
 
+/// 读取文件内容并按 `live_patch` 的方式应用。
 pub fn apply_file<P: AsRef<Path>>(path: P) -> Result<()> {
     let input = std::fs::read_to_string(path)?;
     live_patch(&input)
 }
 
+/// 只做解析检查，不修改策略。
+///
+/// `policy` 既可以是一个已存在的文件路径，也可以直接是策略文本；这里强制使用严格模式，遇到无法
+/// 解析的行就报错，供 `ksud sepolicy check` 使用。
 pub fn check_rule(policy: &str) -> Result<()> {
     let path = Path::new(policy);
     let policy = if path.exists() {

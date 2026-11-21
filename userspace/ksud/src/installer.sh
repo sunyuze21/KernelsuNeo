@@ -1,13 +1,13 @@
 #!/system/bin/sh
 ############################################
-# KernelSU installer script
-# mostly from module_installer.sh
-# and util_functions.sh in Magisk
+# KernelSU 安装脚本
+# 主要来自 module_installer.sh
+# 以及 Magisk 中的 util_functions.sh
 ############################################
 
 umask 022
 
-# customize.sh may set MODULE_HOT_INSTALL_REQUEST=true to skip the reboot
+# customize.sh 可设置 MODULE_HOT_INSTALL_REQUEST=true 来跳过重启
 export KSU_HAS_HOT_INSTALL=true
 
 ui_print() {
@@ -40,7 +40,7 @@ grep_prop() {
 grep_get_prop() {
   local result=$(grep_prop $@)
   if [ -z "$result" ]; then
-    # Fallback to getprop
+    # 退回到 getprop
     getprop "$1"
   else
     echo $result
@@ -80,14 +80,14 @@ check_sepolicy() {
 }
 
 ######################
-# Environment Related
+# 环境相关
 ######################
 
 setup_flashable() {
   ensure_bb
   $BOOTMODE && return
   if [ -z $OUTFD ] || readlink /proc/$$/fd/$OUTFD | grep -q /tmp; then
-    # We will have to manually find out OUTFD
+    # 只能手动找出 OUTFD
     for FD in `ls /proc/$$/fd`; do
       if readlink /proc/$$/fd/$FD | grep -q pipe; then
         if ps | grep -v grep | grep -qE " 3 $FD |status_fd=$FD"; then
@@ -113,10 +113,10 @@ recovery_cleanup() {
 }
 
 #######################
-# Installation Related
+# 安装相关
 #######################
 
-# find_block [partname...]
+# find_block [分区名...]
 find_block() {
   local BLOCK DEV DEVICE DEVNAME PARTNAME UEVENT
   for BLOCK in "$@"; do
@@ -126,7 +126,7 @@ find_block() {
       return 0
     fi
   done
-  # Fallback by parsing sysfs uevents
+  # 退回到解析 sysfs uevent 的方式
   for UEVENT in /sys/dev/block/*/uevent; do
     DEVNAME=`grep_prop DEVNAME $UEVENT`
     PARTNAME=`grep_prop PARTNAME $UEVENT`
@@ -137,7 +137,7 @@ find_block() {
       fi
     done
   done
-  # Look just in /dev in case we're dealing with MTD/NAND without /dev/block devices/links
+  # 只在 /dev 下查找，以应对没有 /dev/block 设备/链接的 MTD/NAND
   for DEV in "$@"; do
     DEVICE=`find /dev \( -type b -o -type c -o -type l \) -maxdepth 1 -iname $DEV | head -n 1` 2>/dev/null
     if [ ! -z $DEVICE ]; then
@@ -148,7 +148,7 @@ find_block() {
   return 1
 }
 
-# setup_mntpoint <mountpoint>
+# setup_mntpoint <挂载点>
 setup_mntpoint() {
   local POINT=$1
   [ -L $POINT ] && mv -f $POINT ${POINT}_link
@@ -158,14 +158,14 @@ setup_mntpoint() {
   fi
 }
 
-# mount_name <partname(s)> <mountpoint> <flag>
+# mount_name <分区名> <挂载点> <标志>
 mount_name() {
   local PART=$1
   local POINT=$2
   local FLAG=$3
   setup_mntpoint $POINT
   is_mounted $POINT && return
-  # First try mounting with fstab
+  # 先尝试按 fstab 挂载
   mount $FLAG $POINT 2>/dev/null
   if ! is_mounted $POINT; then
     local BLOCK=$(find_block $PART)
@@ -174,9 +174,9 @@ mount_name() {
   ui_print "- Mounting $POINT"
 }
 
-# mount_ro_ensure <partname(s)> <mountpoint>
+# mount_ro_ensure <分区名> <挂载点>
 mount_ro_ensure() {
-  # We handle ro partitions only in recovery
+  # 只在 recovery 中处理只读分区
   $BOOTMODE && return
   local PART=$1
   local POINT=$2
@@ -185,7 +185,7 @@ mount_ro_ensure() {
 }
 
 mount_partitions() {
-  # Check A/B slot
+  # 检查 A/B 槽位
   SLOT=`grep_cmdline androidboot.slot_suffix`
   if [ -z $SLOT ]; then
     SLOT=`grep_cmdline androidboot.slot`
@@ -193,7 +193,7 @@ mount_partitions() {
   fi
   [ -z $SLOT ] || ui_print "- Current boot slot: $SLOT"
 
-  # Mount ro partitions
+  # 挂载只读分区
   if is_mounted /system_root; then
     umount /system 2&>/dev/null
     umount /system_root 2&>/dev/null
@@ -212,11 +212,11 @@ mount_partitions() {
     SYSTEM_ROOT=false
     grep ' / ' /proc/mounts | grep -qv 'rootfs' || grep -q ' /system_root ' /proc/mounts && SYSTEM_ROOT=true
   fi
-  # /vendor is used only on some older devices for recovery AVBv1 signing so is not critical if fails
+  # /vendor 只在部分旧设备的 recovery AVBv1 签名中用到，挂载失败不影响主要流程
   [ -L /system/vendor ] && mount_name vendor$SLOT /vendor '-o ro'
   $SYSTEM_ROOT && ui_print "- Device is system-as-root"
 
-  # Mount sepolicy rules dir locations in recovery (best effort)
+  # 在 recovery 中挂载 sepolicy 规则目录（尽力而为）
   if ! $BOOTMODE; then
     mount_name "cache cac" /cache
     mount_name metadata /metadata
@@ -252,7 +252,7 @@ api_level_arch_detect() {
 }
 
 #################
-# Module Related
+# 模块相关
 #################
 
 check_managed_features() {
@@ -263,13 +263,13 @@ check_managed_features() {
 
   ui_print "- Checking managed features: $MANAGED_FEATURES"
 
-  # Split features by comma
+  # 按逗号拆分特性
   echo "$MANAGED_FEATURES" | tr ',' '\n' | while read -r feature; do
-    # Trim whitespace
+    # 去掉首尾空白
     feature=$(echo "$feature" | xargs)
     [ -z "$feature" ] && continue
 
-    # Check feature status using ksud
+    # 通过 ksud 检查特性状态
     local status=$(/data/adb/ksud feature check "$feature" 2>/dev/null)
 
     case "$status" in
@@ -330,30 +330,30 @@ request_zip_size_check() {
 
 boot_actions() { return; }
 
-# Require ZIPFILE to be set
+# 要求已设置 ZIPFILE
 is_legacy_script() {
   unzip -l "$ZIPFILE" install.sh | grep -q install.sh
   return $?
 }
 
 handle_partition() {
-    # if /system/vendor is a symlink, we need to move it out of $MODPATH/system
-    # if /system/vendor is a normal directory, no special handling is needed.
+    # 若 /system/vendor 是符号链接，需要把它移出 $MODPATH/system
+    # 若 /system/vendor 是普通目录，则无需特殊处理。
     if [ ! -e $MODPATH/system/$1 ]; then
-        # no partition found
+        # 没有找到该分区
         return;
     fi
 
-    # we move the folder to / only if it is a native folder that is not a symlink
+    # 只有当它是真实目录（而非符号链接）时，才把它移动到 /
     if [ -d "/$1" ] && [ ! -L "/$1" ]; then
         ui_print "- Handle partition /$1"
-        # we create a symlink if module want to access $MODPATH/system/$1
-        # but it doesn't always work(ie. write it in post-fs-data.sh would fail because it is readonly)
+        # 模块若想访问 $MODPATH/system/$1，需要创建符号链接
+        # 但这并不总是可行（例如在 post-fs-data.sh 中写入会因只读而失败）
         mv -f $MODPATH/system/$1 $MODPATH/$1 && ln -sf ../$1 $MODPATH/system/$1
     fi
 }
 
-# Require OUTFD, ZIPFILE to be set
+# 要求已设置 OUTFD、ZIPFILE
 install_module() {
   rm -rf $TMPDIR
   mkdir -p $TMPDIR
@@ -363,14 +363,14 @@ install_module() {
   mount_partitions
   api_level_arch_detect
 
-  # Setup busybox and binaries
+  # 准备 busybox 和二进制文件
   if $BOOTMODE; then
     boot_actions
   else
     recovery_actions
   fi
 
-  # Extract prop file
+  # 解压 prop 文件
   unzip -o "$ZIPFILE" module.prop -d $TMPDIR >&2
   [ ! -f $TMPDIR/module.prop ] && abort "! Unable to extract zip file!"
 
@@ -382,20 +382,20 @@ install_module() {
   MODAUTH=`grep_prop author $TMPDIR/module.prop`
   MODPATH=$MODULEROOT/$MODID
 
-  # Check managed features
+  # 检查受管理的特性
   check_managed_features $TMPDIR/module.prop
 
-  # Create mod paths
+  # 创建模块路径
   rm -rf $MODPATH
   mkdir -p $MODPATH
 
   if is_legacy_script; then
     unzip -oj "$ZIPFILE" module.prop install.sh uninstall.sh 'common/*' -d $TMPDIR >&2
 
-    # Load install script
+    # 加载安装脚本
     . $TMPDIR/install.sh
 
-    # Callbacks
+    # 回调
     print_modname
     on_install
 
@@ -418,7 +418,7 @@ install_module() {
       ui_print "- Extracting module files"
       unzip -o "$ZIPFILE" -x 'META-INF/*' -d $MODPATH >&2
 
-      # Default permissions
+      # 默认权限
       set_perm_recursive $MODPATH 0 0 0755 0644
       set_perm_recursive $MODPATH/system/bin 0 2000 0755 0755
       set_perm_recursive $MODPATH/system/xbin 0 2000 0755 0755
@@ -426,17 +426,17 @@ install_module() {
       set_perm_recursive $MODPATH/system/vendor 0 2000 0755 0755 u:object_r:vendor_file:s0
     fi
 
-    # Load customization script
+    # 加载定制脚本
     [ -f $MODPATH/customize.sh ] && . $MODPATH/customize.sh
   fi
 
-  # Handle replace folders
+  # 处理替换目录
   for TARGET in $REPLACE; do
     ui_print "- Replace target: $TARGET"
     mark_replace $MODPATH$TARGET
   done
 
-  # Handle remove files
+  # 处理删除文件
   for TARGET in $REMOVE; do
     ui_print "- Remove target: $TARGET"
     mark_remove $MODPATH$TARGET
@@ -453,7 +453,7 @@ install_module() {
     rm -rf $NVBASE/modules/$MODID/disable 2>/dev/null
     cp -af $MODPATH/module.prop $NVBASE/modules/$MODID/module.prop
 
-    # Tell ksud to apply the module right away
+    # 通知 ksud 立即应用该模块
     if [ "$MODULE_HOT_INSTALL_REQUEST" = "true" ]; then
       echo "$MODULE_HOT_RUN_SCRIPT" > $MODPATH/.ksu_hot_install
     else
@@ -461,7 +461,7 @@ install_module() {
     fi
   fi
 
-  # Remove stuff that doesn't belong to modules and clean up any empty directories
+  # 删除不属于模块的内容，并清理空目录
   rm -rf \
   $MODPATH/system/placeholder $MODPATH/customize.sh \
   $MODPATH/README.md $MODPATH/.git*
@@ -475,10 +475,10 @@ install_module() {
 }
 
 ##########
-# Presets
+# 预设
 ##########
 
-# Detect whether in boot mode
+# 检测是否处于 boot 模式
 [ -z $BOOTMODE ] && ps | grep zygote | grep -qv grep && BOOTMODE=true
 [ -z $BOOTMODE ] && ps -A 2>/dev/null | grep zygote | grep -qv grep && BOOTMODE=true
 [ -z $BOOTMODE ] && BOOTMODE=false
@@ -488,6 +488,6 @@ TMPDIR=/dev/tmp
 POSTFSDATAD=$NVBASE/post-fs-data.d
 SERVICED=$NVBASE/service.d
 
-# Some modules dependents on this
+# 部分模块依赖于此
 export MAGISK_VER=25.2
 export MAGISK_VER_CODE=25200

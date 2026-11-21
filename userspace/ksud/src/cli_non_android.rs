@@ -1,3 +1,9 @@
+//! 非 Android（宿主机）构建下 ksud 的命令行入口。
+//!
+//! 宿主机只需要离线处理 boot 镜像的流程，因此这里仅暴露 boot 镜像
+//! 修补/恢复、APK 签名提取和内置 KMI 列表这几条子命令。Android 构建
+//! 使用 `cli.rs` 中的完整 CLI。
+
 use anyhow::Result;
 use clap::Parser;
 
@@ -5,7 +11,7 @@ use crate::boot_patch::{BootPatchArgs, BootRestoreArgs};
 use crate::lkm_image::BootPatchV2Args;
 use crate::{apk_sign, defs};
 
-/// KernelSU cli for non-android
+/// 非 Android 平台的 KernelSU 命令行工具
 #[derive(Parser, Debug)]
 #[command(author, version = defs::VERSION_NAME, about, long_about = None)]
 struct Args {
@@ -15,27 +21,32 @@ struct Args {
 
 #[derive(clap::Subcommand, Debug)]
 enum Commands {
-    /// Patch boot or init_boot images to apply KernelSU
+    /// 修补 boot 或 init_boot 镜像以应用 KernelSU
     BootPatch(BootPatchArgs),
 
-    /// Restore boot or init_boot images patched by KernelSU
+    /// 恢复被 KernelSU 修补过的 boot 或 init_boot 镜像
     BootRestore(BootRestoreArgs),
 
-    /// Patch KernelSU into a boot image
+    /// 将 KernelSU 修补进 boot 镜像
     ///
-    /// Always operates on a boot image; never selects init_boot or vendor_boot.
+    /// 始终操作 boot 镜像，绝不会选择 init_boot 或 vendor_boot。
     BootPatchV2(BootPatchV2Args),
 
-    /// Get apk size and hash
+    /// 获取 apk 大小和哈希
     GetSign {
-        /// apk path
+        /// apk 路径
         apk: String,
     },
 
-    /// show supported kmi versions
+    /// 显示支持的 KMI 版本
     SupportedKmis,
 }
 
+/// 解析宿主机 CLI 并分发到对应子命令。
+///
+/// 这里而不是 `main` 中初始化 `env_logger`，以免影响使用其他日志后端的
+/// Android 构建。执行前记录解析出的命令，便于复现构建日志；失败时既写
+/// 日志又返回错误，因为调用 ksud 的脚本看的是退出状态而非日志内容。
 pub fn run() -> Result<()> {
     env_logger::init();
 
@@ -45,6 +56,8 @@ pub fn run() -> Result<()> {
 
     let result = match cli.command {
         Commands::GetSign { apk } => {
+            // sign.0 是 APK 字节数，sign.1 是签名证书哈希；大小用十六进制
+            // 输出，与其他工具的输出习惯保持一致。
             let sign = apk_sign::get_apk_signature(&apk)?;
             println!("size: {:#x}, hash: {}", sign.0, sign.1);
             Ok(())
@@ -57,6 +70,7 @@ pub fn run() -> Result<()> {
         Commands::BootPatchV2(patch) => crate::lkm_image::patch_boot(&patch),
 
         Commands::SupportedKmis => {
+            // 每行一个名字，方便 diff 和 grep。
             let kmi = crate::assets::list_supported_kmi();
             for kmi in &kmi {
                 println!("{kmi}");

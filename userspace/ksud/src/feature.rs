@@ -1,3 +1,9 @@
+//! 用户态特性开关管理器。
+//!
+//! 特性值存在于两处：内核（通过 feature supercall 访问）和 /data/adb/ksu 下的
+//! 小型二进制配置。本模块在启动时加载、应用、裁剪并持久化该配置，同时为
+//! 通过 `manage.<feature>` 模块配置声明归属的特性执行模块所有权校验。
+
 use crate::sulog;
 use anyhow::{Context, Result, bail};
 use const_format::concatcp;
@@ -10,10 +16,17 @@ use crate::defs;
 use crate::feature_id::{FeatureId, parse_feature_id};
 
 const FEATURE_CONFIG_PATH: &str = concatcp!(defs::WORKING_DIR, ".feature_config");
+// 标识配置文件；按小端字节序依次是 "USK" 和 0x7f。
 #[allow(clippy::unreadable_literal)]
 const FEATURE_MAGIC: u32 = 0x7f4b5355;
+// 仅当磁盘布局变化时才递增；读取端在版本不匹配时仅告警，
+// 以便降级时仍有机会解析。
 const FEATURE_VERSION: u32 = 1;
 
+/// 在内核更新成功后执行用户态副作用。
+///
+/// 值由内核持有，这个钩子只做响应。尤其是 sulog，需要其守护进程运行，
+/// 内核才有日志事件的消费者。
 fn on_feature_applied(feature_id: FeatureId, value: u64) {
     if feature_id == FeatureId::Sulog
         && value != 0
@@ -23,6 +36,7 @@ fn on_feature_applied(feature_id: FeatureId, value: u64) {
     }
 }
 
+/// 在内核中应用特性，然后执行其用户态钩子。
 fn set_kernel_feature(feature_id: FeatureId, value: u64) -> Result<()> {
     crate::ksucalls::set_feature(feature_id as u32, value)
         .with_context(|| format!("Failed to set feature {} to {value}", feature_id.name()))?;
@@ -32,10 +46,18 @@ fn set_kernel_feature(feature_id: FeatureId, value: u64) -> Result<()> {
     Ok(())
 }
 
+/// 判断内核是否将该特性标记为由启动配置强制指定。
+///
+/// 查询失败按“未强制”处理；后续写入会报告真正的错误，
+/// 而不是让这个探测阻断整个启动。
 fn is_forced(id: u32) -> bool {
     crate::ksucalls::get_feature(id).is_ok_and(|state| state.forced)
 }
 
+/// 以 `特性 id -> 值` 的形式加载持久化配置。
+///
+/// 文件不存在不算错误，返回空映射，从而使用内核默认值。格式为小端：
+/// magic、version、条目数，然后是一组 `(u32 id, u64 value)`。
 pub fn load_binary_config() -> Result<HashMap<u32, u64>> {
     let path = Path::new(FEATURE_CONFIG_PATH);
     if !path.exists() {
@@ -60,6 +82,7 @@ pub fn load_binary_config() -> Result<HashMap<u32, u64>> {
     let version = u32::from_le_bytes(version_buf);
 
     if version != FEATURE_VERSION {
+        // 仅告警但继续解析：若在此拒绝，较新 ksud 写出的配置会让较旧版本无法启动。
         log::warn!(
             "Feature config version mismatch: expected {FEATURE_VERSION}, got {version
             }",
@@ -91,6 +114,10 @@ pub fn load_binary_config() -> Result<HashMap<u32, u64>> {
     Ok(features)
 }
 
+/// 将 `features` 持久化到配置文件，覆盖原有内容。
+///
+/// 先创建目录，因为此操作可能在工作目录其余部分就绪前运行。HashMap 的迭代
+/// 顺序任意，但加载端不依赖该顺序。`sync_all` 保证文件在可能的重启前落盘。
 pub fn save_binary_config(features: &HashMap<u32, u64>) -> Result<()> {
     crate::utils::ensure_dir_exists(Path::new(defs::WORKING_DIR))?;
 
@@ -114,6 +141,7 @@ pub fn save_binary_config(features: &HashMap<u32, u64>) -> Result<()> {
             .with_context(|| format!("Failed to write feature value for id {id}"))?;
     }
 
+    // 刷盘，避免崩溃或重启留下截断的配置，导致下次启动解析失败。
     file.sync_all()
         .with_context(|| "Failed to sync feature config")?;
 
@@ -121,6 +149,10 @@ pub fn save_binary_config(features: &HashMap<u32, u64>) -> Result<()> {
     Ok(())
 }
 
+/// 把持久化的特性值推送到内核。
+///
+/// 应用过程是尽力而为的：某个特性不受支持或被拒绝时只记录日志并跳过，
+/// 让其余特性和启动流程继续。强制特性保持不变，因为内核已应用启动配置。
 pub fn apply_config(features: &HashMap<u32, u64>) {
     log::info!("Applying feature configuration to kernel...");
 
@@ -141,6 +173,7 @@ pub fn apply_config(features: &HashMap<u32, u64>) {
                 }
             },
             None => match crate::ksucalls::set_feature(id, value) {
+                // 当前 ksud 不认识：直接透传原始 id，避免较新内核的特性在旧配置中丢失。
                 Ok(()) => {
                     log::info!("Set feature {id} to {value}");
                     applied += 1;
@@ -155,6 +188,7 @@ pub fn apply_config(features: &HashMap<u32, u64>) {
     log::info!("Applied {applied} features successfully");
 }
 
+/// 打印单个特性在内核中的当前状态。
 pub fn get_feature(id: &str) -> Result<()> {
     let feature_id = parse_feature_id(id)?;
     let state = crate::ksucalls::get_feature(feature_id as u32)
@@ -183,6 +217,7 @@ pub fn get_feature(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// 打印配置文件中持久化的值，不查询内核。
 pub fn get_feature_config(id: &str) -> Result<()> {
     let feature_id = parse_feature_id(id)?;
 
@@ -205,6 +240,11 @@ pub fn get_feature_config(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// 从 CLI 设置特性，并遵守启动配置与模块所有权限制。
+///
+/// 强制特性由内核启动配置持有，不能在此修改。若某个活跃模块通过
+/// `manage.<feature>=true` 声明了该特性，则只有该模块可以修改（通过 ksud
+/// 为模块脚本导出的 `KSU_MODULE` 环境变量识别）。
 pub fn set_feature(id: &str, value: u64) -> Result<()> {
     let feature_id = parse_feature_id(id)?;
 
@@ -218,9 +258,9 @@ pub fn set_feature(id: &str, value: u64) -> Result<()> {
         );
     }
 
-    // Check if this feature is managed by any module
+    // 检查该特性是否由任意模块管理
     if let Ok(managed_features_map) = crate::module::get_managed_features() {
-        // Find which modules manage this feature
+        // 找出管理该特性的模块
         let managing_modules: Vec<&String> = managed_features_map
             .iter()
             .filter(|(_, features)| features.iter().any(|f| f == feature_id.name()))
@@ -228,7 +268,7 @@ pub fn set_feature(id: &str, value: u64) -> Result<()> {
             .collect();
 
         if !managing_modules.is_empty() {
-            // Feature is managed, check if caller is an authorized module
+            // 特性已被管理，检查调用方是否为授权模块
             let caller_module = std::env::var("KSU_MODULE").unwrap_or_default();
 
             if caller_module.is_empty() || !managing_modules.contains(&&caller_module) {
@@ -261,14 +301,18 @@ pub fn set_feature(id: &str, value: u64) -> Result<()> {
     Ok(())
 }
 
+/// 打印所有已知特性的内核状态和归属标记。
+///
+/// 模块归属使用反向映射渲染，因此一个特性可以显示所有声明它的模块，
+/// 而不只是第一个找到的模块。
 pub fn list_features() {
     println!("Available Features:");
     println!("{}", "=".repeat(80));
 
-    // Get managed features from modules
+    // 从模块获取受管理的特性
     let managed_features_map = crate::module::get_managed_features().unwrap_or_default();
 
-    // Build a reverse map: feature_name -> Vec<module_id>
+    // 构建反向映射：feature_name -> Vec<module_id>
     let mut feature_to_modules: HashMap<String, Vec<String>> = HashMap::new();
     for (module_id, feature_list) in &managed_features_map {
         for feature_name in feature_list {
@@ -281,6 +325,8 @@ pub fn list_features() {
 
     for feature_id in &FeatureId::ALL {
         let id = *feature_id as u32;
+        // 查询失败时回落到默认状态（不支持、值为 0），
+        // 使内核缺少某特性时列表仍然可用。
         let state = crate::ksucalls::get_feature(id).unwrap_or_default();
 
         let status = if !state.supported {
@@ -320,6 +366,7 @@ pub fn list_features() {
     }
 }
 
+/// CLI 入口：加载持久化配置并立即应用。
 pub fn load_config_and_apply() -> Result<()> {
     let features = load_binary_config()?;
 
@@ -333,9 +380,14 @@ pub fn load_config_and_apply() -> Result<()> {
     Ok(())
 }
 
+/// 把当前内核特性值快照写入配置文件。
+///
+/// 先加载现有配置，使未被覆盖的条目得以保留：强制特性保留持久化的值，
+/// 不支持的特性维持原样。只更新受支持且未被强制的值；强制特性仍由启动配置
+/// 控制，待其不再强制后可再编辑。
 pub fn save_config() -> Result<()> {
-    // Keep persisted values of forced features, they are in effect again once
-    // the boot config no longer forces them.
+    // 保留强制特性的持久化值；一旦启动配置不再强制指定它们，
+    // 这些值会重新生效。
     let mut features = load_binary_config().unwrap_or_default();
 
     for feature_id in &FeatureId::ALL {
@@ -357,16 +409,20 @@ pub fn save_config() -> Result<()> {
     Ok(())
 }
 
+/// 为脚本和模块打印单个机器可读的状态标记。
+///
+/// 优先级依次为 forced、模块管理、内核支持；输出是 `forced`、`managed`、
+/// `supported` 或 `unsupported` 之一。
 pub fn check_feature(id: &str) -> Result<()> {
     let feature_id = parse_feature_id(id)?;
 
-    // Forced by boot config takes precedence over module management
+    // 启动配置强制指定的优先级高于模块管理
     if crate::ksucalls::get_feature(feature_id as u32).is_ok_and(|state| state.forced) {
         println!("forced");
         return Ok(());
     }
 
-    // Check if this feature is managed by any module
+    // 检查该特性是否由任意模块管理
     let managed_features_map = crate::module::get_managed_features().unwrap_or_default();
     let is_managed = managed_features_map
         .values()
@@ -377,7 +433,7 @@ pub fn check_feature(id: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Check if the feature is supported by kernel
+    // 检查内核是否支持该特性
     let state = crate::ksucalls::get_feature(feature_id as u32)
         .with_context(|| format!("Failed to get feature {id}"))?;
 
@@ -390,9 +446,9 @@ pub fn check_feature(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Forced features are applied by the kernel itself, only do the userspace part.
-/// Runs regardless of safe mode and the persisted config, as the kernel applies
-/// them in both cases.
+/// 强制特性由内核自身应用，这里只执行用户态部分。
+/// 无论安全模式和持久化配置如何都会运行，因为两种情况下
+/// 内核都会应用它们。
 pub fn init_forced_features() {
     for feature_id in FeatureId::ALL {
         if let Ok(state) = crate::ksucalls::get_feature(feature_id as u32)
@@ -408,12 +464,17 @@ pub fn init_forced_features() {
     }
 }
 
+/// 启动时初始化非强制特性。
+///
+/// 在活跃模块集合确定后运行，因为被声明为模块管理的特性必须在应用前从配置中
+/// 移除：由所属模块自行设置。裁剪后的配置会写回，避免后续启动重复尝试。
+/// 枚举模块失败时只记录告警，并应用完整配置。
 pub fn init_features() -> Result<()> {
     log::info!("Initializing features from config...");
 
     let mut features = load_binary_config()?;
 
-    // Get managed features from active modules and skip them during init
+    // 获取活跃模块管理的特性，并在初始化时跳过它们
     if let Ok(managed_features_map) = crate::module::get_managed_features() {
         if !managed_features_map.is_empty() {
             log::info!(
@@ -421,7 +482,7 @@ pub fn init_features() -> Result<()> {
                 managed_features_map.len()
             );
 
-            // Build a set of all managed feature IDs to skip
+            // 汇总所有需要跳过的受管理特性 ID
             for (module_id, feature_list) in &managed_features_map {
                 log::info!(
                     "Module '{module_id}' manages {} feature(s)",
@@ -431,7 +492,7 @@ pub fn init_features() -> Result<()> {
                 for feature_name in feature_list {
                     if let Ok(feature_id) = parse_feature_id(feature_name) {
                         let feature_id_u32 = feature_id as u32;
-                        // Remove managed features from config, let modules control them
+                        // 从配置中移除受管理的特性，交由模块自行控制
                         if features.remove(&feature_id_u32).is_some() {
                             log::info!(
                                 "  - Skipping managed feature '{feature_name}' (controlled by module: {module_id})",
@@ -462,7 +523,7 @@ pub fn init_features() -> Result<()> {
 
     apply_config(&features);
 
-    // Save the configuration (excluding managed features)
+    // 保存配置（不含受管理的特性）
     save_binary_config(&features)?;
     log::info!("Saved feature configuration to file");
 

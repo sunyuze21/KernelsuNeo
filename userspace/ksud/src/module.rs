@@ -1,3 +1,10 @@
+//! 模块生命周期管理：安装、启用/禁用、卸载、脚本执行、列表输出，以及内核在
+//! 下次启动时读取的 preinit 状态（`modules.rc` / preinit 目录）。
+//!
+//! 模块位于 `/data/adb/modules/<id>`。新安装先暂存到 `modules_update/<id>`，
+//! 在 post-fs-data 阶段才移动到正式目录，从而保证当前系统在重启（或热安装）
+//! 之前保持一致。
+
 #[allow(clippy::wildcard_imports)]
 use crate::utils::*;
 use crate::{
@@ -33,6 +40,8 @@ use crate::defs::{MODULE_DIR, MODULE_UPDATE_DIR, UPDATE_FILE_NAME};
 use crate::module::ModuleType::{Active, All};
 use std::os::unix::{prelude::PermissionsExt, process::CommandExt};
 
+// 可刷写 ZIP 的安装脚本被内嵌进 ksud，因此无需 Manager 也能安装模块
+// （例如在 recovery 或 root shell 中）。
 const INSTALLER_CONTENT: &str = include_str!("./installer.sh");
 const INSTALL_MODULE_SCRIPT: &str = concatcp!(
     INSTALLER_CONTENT,
@@ -43,11 +52,11 @@ const INSTALL_MODULE_SCRIPT: &str = concatcp!(
     "\n"
 );
 
-/// Validate module_id format and security
-/// Module ID must match: ^[a-zA-Z][a-zA-Z0-9._-]+$
-/// - Must start with a letter (a-zA-Z)
-/// - Followed by one or more alphanumeric, dot, underscore, or hyphen characters
-/// - Minimum length: 2 characters
+/// 校验 module_id 的格式与安全性
+/// module_id 必须匹配：^[a-zA-Z][a-zA-Z0-9._-]+$
+/// - 必须以字母（a-zA-Z）开头
+/// - 后跟一个或多个字母、数字、点、下划线或连字符
+/// - 长度至少为 2 个字符
 pub fn validate_module_id(module_id: &str) -> Result<()> {
     let re = Regex::new(r"^[a-zA-Z][a-zA-Z0-9._-]+$")?;
     if re.is_match(module_id) {
@@ -59,7 +68,10 @@ pub fn validate_module_id(module_id: &str) -> Result<()> {
     }
 }
 
-/// Get common environment variables for script execution
+/// 所有模块脚本共享的环境变量（KSU/Magisk 风格）。
+///
+/// 只有校验通过的 id 才会导出 `KSU_MODULE`，防止脚本向标识符注入 shell
+/// 元字符。
 pub fn get_common_script_envs(module_id: Option<&str>) -> Vec<(&'static str, String)> {
     let mut envs = vec![
         ("ASH_STANDALONE", "1".to_string()),
@@ -94,11 +106,13 @@ pub fn get_common_script_envs(module_id: Option<&str>) -> Vec<(&'static str, Str
     envs
 }
 
+/// 执行 ZIP 中的 installer.sh；`is_metamodule` 为真时允许 metamodule
+/// 替换成自己的安装器。
 fn exec_install_script(module_file: &str, is_metamodule: bool, module_id: &str) -> Result<()> {
     let realpath = std::fs::canonicalize(module_file)
         .with_context(|| format!("realpath: {module_file} failed"))?;
 
-    // Get install script from metamodule module
+    // 从 metamodule 模块中获取安装脚本
     let install_script =
         metamodule::get_install_script(is_metamodule, INSTALLER_CONTENT, INSTALL_MODULE_SCRIPT)?;
 
@@ -112,9 +126,9 @@ fn exec_install_script(module_file: &str, is_metamodule: bool, module_id: &str) 
     Ok(())
 }
 
-// Check if Android boot is completed before installing modules
+// 安装模块前检查 Android 是否已完成启动
 fn ensure_boot_completed() -> Result<()> {
-    // ensure getprop sys.boot_completed == 1
+    // 确保 getprop sys.boot_completed == 1
     if getprop("sys.boot_completed").as_deref() != Some("1") {
         bail!("Android is Booting!");
     }
@@ -128,6 +142,10 @@ pub enum ModuleType {
     Updated,
 }
 
+/// 遍历指定类型的模块目录。
+///
+/// `Active` 会跳过已禁用和已标记删除的模块，因为这两类模块本次启动都不应
+/// 执行脚本。
 #[allow(clippy::needless_pass_by_value)]
 pub fn foreach_module(
     module_type: ModuleType,
@@ -181,13 +199,21 @@ pub fn load_sepolicy_rule() -> Result<()> {
     Ok(())
 }
 
+/// `exec_script` 如何处理启动的脚本。
 #[derive(Clone, Copy)]
 pub enum ScriptWait {
+    /// 启动后不等待（service/boot-completed 阶段）。
     NoWait,
+    /// 阻塞直到脚本退出（安装器、卸载器、action）。
     Forever,
+    /// 只等到本次启动阶段的共享截止时间（见 BOOT_STAGE_TIMEOUT）。
     Until(Instant),
 }
 
+/// 在脚本批次执行期间阻塞 SIGCHLD 的 RAII 守卫。
+///
+/// 阻塞 SIGCHLD 后，`wait_until` 可以用 `sigtimedwait` 精确等待某个子进程，
+/// 而不会与其他子进程（或同进程组中无关进程）的信号竞争。
 struct SigchldBlock {
     set: libc::sigset_t,
     previous: libc::sigset_t,
@@ -195,7 +221,7 @@ struct SigchldBlock {
 
 impl SigchldBlock {
     fn block() -> std::io::Result<Self> {
-        // Initialize both sets before passing them to libc.
+        // 在传给 libc 之前先初始化这两个信号集。
         let mut set = unsafe { std::mem::zeroed() };
         let mut previous = unsafe { std::mem::zeroed() };
         unsafe {
@@ -208,9 +234,11 @@ impl SigchldBlock {
         Ok(Self { set, previous })
     }
 
+    /// 若 `pid` 已退出则回收；否则休眠到收到 SIGCHLD 或到达截止时间。
+    /// 超时返回 `false`。
     fn wait_until(&self, pid: libc::pid_t, deadline: Instant) -> std::io::Result<bool> {
         loop {
-            // Only reap the script being waited for. Other children can also send SIGCHLD.
+            // 只回收正在等待的脚本。其他子进程也可能发送 SIGCHLD。
             let result = unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
             if result == pid {
                 return Ok(true);
@@ -231,7 +259,7 @@ impl SigchldBlock {
                 tv_sec: remaining.as_secs() as libc::time_t,
                 tv_nsec: remaining.subsec_nanos().into(),
             };
-            // SIGCHLD stays blocked between waitpid and sigtimedwait to avoid lost wakeups.
+            // 在 waitpid 与 sigtimedwait 之间保持 SIGCHLD 阻塞，以免丢失唤醒。
             if unsafe {
                 libc::sigtimedwait(
                     &raw const self.set,
@@ -253,7 +281,7 @@ impl SigchldBlock {
 
 impl Drop for SigchldBlock {
     fn drop(&mut self) {
-        // Restore the parent's signal mask on success, timeout, and every error path.
+        // 无论成功、超时还是任何错误路径，都要恢复父进程的信号掩码。
         if unsafe {
             libc::sigprocmask(
                 libc::SIG_SETMASK,
@@ -270,11 +298,15 @@ impl Drop for SigchldBlock {
     }
 }
 
+/// 用 busybox sh 启动 `path`，并带上标准模块环境变量。
 pub fn exec_script<T: AsRef<Path>>(path: T, wait: ScriptWait) -> Result<()> {
     exec_script_with(path, wait, |_| {})
 }
 
-/// Like `exec_script`, letting the caller adjust the command before it is spawned.
+/// 与 `exec_script` 类似，但允许调用方在启动前调整命令。
+///
+/// 通过脚本路径判断是否属于模块，从而设置 `KSU_MODULE`；子进程在 exec 前还会
+/// 恢复调用方的信号掩码、脱离进程组并切换 cgroup。
 pub fn exec_script_with<T: AsRef<Path>>(
     path: T,
     wait: ScriptWait,
@@ -283,7 +315,7 @@ pub fn exec_script_with<T: AsRef<Path>>(
     info!("exec {}", path.as_ref().display());
 
     let is_module_script = path.as_ref().starts_with(defs::MODULE_DIR);
-    // Extract module_id from path if it matches /data/adb/modules/{id}/...
+    // 若路径匹配 /data/adb/modules/{id}/...，则从中提取 module_id
     let module_id = if is_module_script {
         path.as_ref()
             .strip_prefix(defs::MODULE_DIR)
@@ -295,7 +327,7 @@ pub fn exec_script_with<T: AsRef<Path>>(
         None
     };
 
-    // Validate and log module_id extraction
+    // 校验并记录 module_id 的提取结果
     let validated_module_id = module_id
         .as_ref()
         .and_then(|id| match validate_module_id(id) {
@@ -333,7 +365,7 @@ pub fn exec_script_with<T: AsRef<Path>>(
                 return Err(std::io::Error::last_os_error());
             }
             detach_process_group(true);
-            // ignore the error?
+            // 忽略这里的错误？
             switch_cgroups();
             Ok(())
         })
@@ -349,7 +381,7 @@ pub fn exec_script_with<T: AsRef<Path>>(
         ScriptWait::NoWait => command.spawn().map(|_| ()),
         ScriptWait::Forever => command.status().map(|_| ()),
         ScriptWait::Until(deadline) => command.spawn().and_then(|child| {
-            // Once the shared deadline has passed, launch later scripts without waiting.
+            // 共享截止时间已过，后续脚本直接启动而不再等待。
             if deadline > Instant::now()
                 && !sigchld.wait_until(child.id() as libc::pid_t, deadline)?
             {
@@ -420,6 +452,11 @@ pub fn load_system_prop() -> Result<()> {
     Ok(())
 }
 
+/// 删除带 `remove` 标记的模块。
+///
+/// 先执行 metamodule 的卸载钩子，再执行模块自身的 `uninstall.sh`，最后清理
+/// 配置并删除目录。该流程在 post-fs-data 执行，使模块有完整一次启动的时间做
+/// 清理。
 pub fn prune_modules() -> Result<()> {
     foreach_module(All, |module| {
         if !module.join(defs::REMOVE_FILE_NAME).exists() {
@@ -428,10 +465,10 @@ pub fn prune_modules() -> Result<()> {
 
         info!("remove module: {}", module.display());
 
-        // Execute metamodule's metauninstall.sh first
+        // 先执行 metamodule 的 metauninstall.sh
         let module_id = module.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-        // Check if this is a metamodule
+        // 检查它是否为 metamodule
         let is_metamodule =
             read_module_prop(module).is_ok_and(|props| metamodule::is_metamodule(&props));
 
@@ -444,7 +481,7 @@ pub fn prune_modules() -> Result<()> {
             warn!("Failed to exec metamodule uninstall for {module_id}: {e}");
         }
 
-        // Then execute module's own uninstall.sh
+        // 再执行模块自身的 uninstall.sh
         let uninstaller = module.join("uninstall.sh");
         if uninstaller.exists()
             && let Err(e) = exec_script(uninstaller, ScriptWait::Forever)
@@ -452,12 +489,12 @@ pub fn prune_modules() -> Result<()> {
             warn!("Failed to exec uninstaller: {e}");
         }
 
-        // Clear module configs before removing module directory
+        // 删除模块目录前先清理模块配置
         if let Err(e) = crate::module_config::clear_module_configs(module_id) {
             warn!("Failed to clear configs for {module_id}: {e}");
         }
 
-        // Finally remove the module directory
+        // 最后删除模块目录
         if let Err(e) = remove_dir_all(module) {
             warn!("Failed to remove {}: {e}", module.display());
         }
@@ -465,7 +502,7 @@ pub fn prune_modules() -> Result<()> {
         Ok(())
     })?;
 
-    // collect remaining modules, if none, clean up metamodule record
+    // 收集剩余的模块；若一个不剩，则清理 metamodule 记录
     let remaining_modules: Vec<_> = std::fs::read_dir(defs::MODULE_DIR)?
         .filter_map(std::result::Result::ok)
         .filter(|entry| entry.path().join("module.prop").exists())
@@ -478,10 +515,14 @@ pub fn prune_modules() -> Result<()> {
     Ok(())
 }
 
-// Kernels before this UAPI only look for modules.rc under /metadata/watchdog and /metadata.
+// 低于该 UAPI 版本的内核只会在 /metadata/watchdog 和 /metadata 下查找 modules.rc。
 const PREINIT_VOLD_UAPI_VERSION: u32 = 6;
 
-// Prefer /metadata/vold/ when the kernel reads it, else /metadata/watchdog/, else /metadata.
+/// 选择当前内核会读取的 preinit 目录。
+///
+/// 较新的内核优先 `/metadata/vold/ksu`（对大多数扫描器隐藏）；旧内核只查找
+/// `/metadata/watchdog` 或 `/metadata`。
+// 内核会读取时优先用 /metadata/vold/，否则用 /metadata/watchdog/，最后用 /metadata。
 pub fn preinit_ksu_dir() -> &'static str {
     if ksucalls::get_info().uapi_version >= PREINIT_VOLD_UAPI_VERSION
         && Path::new("/metadata/vold").is_dir()
@@ -494,8 +535,8 @@ pub fn preinit_ksu_dir() -> &'static str {
     }
 }
 
-/// SELinux context to label the preinit files with, matching the host dir so
-/// init's restorecon does not fight us.
+/// preinit 文件使用的 SELinux context，与宿主目录保持一致，
+/// 以免 init 的 restorecon 与我们的设置冲突。
 pub fn preinit_con(dir: &str) -> &'static str {
     if dir == defs::PREINIT_DIR_VOLD {
         defs::VOLD_METADATA_FILE_CON
@@ -504,6 +545,10 @@ pub fn preinit_con(dir: &str) -> &'static str {
     }
 }
 
+/// 把 `dir` 下所有 `.rc` 文件按文件名排序后追加到 `out`。
+///
+/// `mod_id` 用于区分模块的 initrc 目录（全部包含并标注来源）与公共的
+/// `/data/adb/initrc.d`（后者用可执行位作为启用开关）。
 fn collect_rc_files<P: AsRef<Path>>(
     dir: P,
     mod_id: Option<&str>,
@@ -522,7 +567,7 @@ fn collect_rc_files<P: AsRef<Path>>(
             if let Some(mod_id) = mod_id {
                 writeln!(out, "# === from {mod_id}:{} ===", path.display())?;
             } else {
-                // Although the rc file itself is not executable, we still use its executable bit as a switch.
+                // rc 文件本身不可执行，但我们仍用它的可执行位作为启用开关。
                 if !is_executable(&path) {
                     continue;
                 }
@@ -537,8 +582,8 @@ fn collect_rc_files<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Enabled modules for the next boot, by id. modules_update/ wins over modules/, and a disabled or
-/// removed module is skipped even if the other dir has an enabled copy.
+/// 下次开机时启用的模块（按 id）。modules_update/ 优先于 modules/；
+/// 处于禁用或待删除状态的模块会被跳过，即使另一目录中存在启用副本。
 fn next_boot_modules() -> BTreeMap<String, PathBuf> {
     let mut modules: BTreeMap<String, Option<PathBuf>> = BTreeMap::new();
     for src_dir in [defs::MODULE_UPDATE_DIR, defs::MODULE_DIR] {
@@ -569,9 +614,9 @@ fn next_boot_modules() -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
-/// Rebuild PREINITDIR/modules.rc by concatenating *.rc from every enabled
-/// module. The kernel-side read hook splices this file into init.rc on the
-/// next boot.
+/// 通过拼接每个已启用模块的 *.rc 重建 PREINITDIR/modules.rc。
+/// 内核侧的读取钩子会在下次开机时
+/// 把该文件拼接进 init.rc。
 fn regenerate_preinit_rc(
     preinit_str: &str,
     modules: &BTreeMap<String, PathBuf>,
@@ -590,9 +635,9 @@ fn regenerate_preinit_rc(
         let mut tmp = File::create(tmp_path)
             .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
 
-        // collect common initrc first
+        // 先收集公共的 initrc
         collect_rc_files(Path::new(defs::ADB_DIR).join("initrc.d"), None, &mut tmp)?;
-        // then modules in alphabetical order, with their effective module path in the next boot
+        // 再按字母顺序收集模块，并使用它们下次开机时的实际模块路径
         for (id, path) in modules {
             collect_rc_files(path.join(defs::MODULE_INIT_RC_DIR), Some(id), &mut tmp)?;
         }
@@ -607,7 +652,7 @@ fn regenerate_preinit_rc(
         )
     })?;
 
-    // SELinux label so the kernel's filp_open in init context can read it.
+    // 设置 SELinux 标签，使内核在 init 上下文中调用 filp_open 时能读取它。
     if let Err(e) = crate::restorecon::lsetfilecon(out_path, con) {
         debug!("set context on {} failed: {e}", out_path.display());
     }
@@ -615,12 +660,16 @@ fn regenerate_preinit_rc(
     Ok(())
 }
 
-/// Rebuild what the kernel picks up from the preinit partition on the next boot: modules.rc and
-/// the modules' preinit dirs.
+/// 重建内核下次启动会从 preinit 分区读取的内容：modules.rc 和各模块的
+/// preinit 目录。
+///
+/// 每次模块集合变化（安装、启用/禁用、卸载）后都会调用，并在 post-fs-data
+/// 作为兜底再执行一次。当前启动内核未读取的候选目录也会清理，避免 OTA 改变
+/// 内核偏好后仍读到过期的 modules.rc。
 pub fn regenerate_preinit() -> Result<()> {
     let preinit_str = preinit_ksu_dir();
     let con = preinit_con(preinit_str);
-    // The candidates we are not using this boot; clean any leftover from them.
+    // 本次启动不会使用的候选目录；清理其中遗留的内容。
     let stale_strs: Vec<&str> = [
         defs::PREINIT_DIR_VOLD,
         defs::PREINIT_DIR_WATCHDOG,
@@ -632,7 +681,7 @@ pub fn regenerate_preinit() -> Result<()> {
     let modules = next_boot_modules();
 
     let rc = regenerate_preinit_rc(preinit_str, &modules, con);
-    // Clear stale modules.rc at the other candidate paths.
+    // 清理其他候选路径下过期的 modules.rc。
     for stale in &stale_strs {
         std::fs::remove_file(Path::new(stale).join(defs::MODULES_RC_FILE)).ok();
     }
@@ -648,6 +697,9 @@ pub fn regenerate_preinit() -> Result<()> {
     rc.and(preinit)
 }
 
+/// 把 `modules_update/` 中暂存的模块提升到 `modules/`。
+///
+/// 覆盖已有模块时会保留其禁用/删除标记，避免更新悄悄重新启用用户关掉的模块。
 pub fn handle_updated_modules() -> Result<()> {
     let modules_root = Path::new(MODULE_DIR);
     foreach_module(ModuleType::Updated, |updated_module| {
@@ -660,7 +712,7 @@ pub fn handle_updated_modules() -> Result<()> {
             let mut disabled = false;
             let mut removed = false;
             if module_dir.exists() {
-                // If the old module is disabled, we need to also disable the new one
+                // 若旧模块已禁用，新模块也必须保持禁用
                 disabled = module_dir.join(defs::DISABLE_FILE_NAME).exists();
                 removed = module_dir.join(defs::REMOVE_FILE_NAME).exists();
                 remove_dir_all(&module_dir)?;
@@ -683,19 +735,24 @@ pub fn handle_updated_modules() -> Result<()> {
     Ok(())
 }
 
+/// 把模块 ZIP 安装到 `modules_update/` 并执行其安装器。
+///
+/// 若安装器请求热安装，则跳过正常的“暂存到下次启动”流程，立即应用模块。
 fn install_module_to_system(zip: &str) -> Result<String> {
+    // 在 Android 尚未启动完成时安装会与 post-fs-data 的模块提升流程竞争，
+    // 因此要求 boot_completed。
     ensure_boot_completed()?;
 
-    // print banner
+    // 打印 banner
     println!(include_str!("banner"));
 
     assets::ensure_binaries(false).with_context(|| "Failed to extract assets")?;
 
-    // first check if working dir is usable
+    // 先检查工作目录是否可用
     ensure_dir_exists(defs::WORKING_DIR).with_context(|| "Failed to create working dir")?;
     ensure_dir_exists(defs::BINARY_DIR).with_context(|| "Failed to create bin dir")?;
 
-    // read the module_id from zip, if failed it will return early.
+    // 从 zip 中读取 module_id，失败则提前返回。
     let mut buffer: Vec<u8> = Vec::new();
     let entry_path = PathBuf::from_str("module.prop")?;
     let zip_path = PathBuf::from_str(zip)?;
@@ -715,14 +772,14 @@ fn install_module_to_system(zip: &str) -> Result<String> {
     };
     let module_id = module_id.trim();
 
-    // Validate module_id format
+    // 校验 module_id 格式
     validate_module_id(module_id)
         .with_context(|| format!("Invalid module ID in module.prop: '{module_id}'"))?;
 
-    // Check if this module is a metamodule
+    // 检查该模块是否为 metamodule
     let is_metamodule = metamodule::is_metamodule(&module_prop);
 
-    // Check if it's safe to install regular module
+    // 检查安装普通模块是否安全
     if !is_metamodule && let Err(is_disabled) = metamodule::check_install_safety() {
         println!("\n❌ Installation Blocked");
         println!("┌────────────────────────────────");
@@ -739,13 +796,13 @@ fn install_module_to_system(zip: &str) -> Result<String> {
         bail!("Metamodule installation blocked");
     }
 
-    // All modules (including metamodules) are installed to MODULE_UPDATE_DIR
+    // 所有模块（包括 metamodule）都安装到 MODULE_UPDATE_DIR
     let updated_dir = Path::new(defs::MODULE_UPDATE_DIR).join(module_id);
 
     if is_metamodule {
         info!("Installing metamodule: {module_id}");
 
-        // Check if there's already a metamodule installed
+        // 检查是否已安装 metamodule
         if metamodule::has_metamodule()
             && let Some(existing_path) = metamodule::get_metamodule_path()
         {
@@ -782,31 +839,31 @@ fn install_module_to_system(zip: &str) -> Result<String> {
         humansize::format_size(zip_uncompressed_size, humansize::DECIMAL)
     );
 
-    // Ensure module directory exists and set SELinux context
+    // 确保模块目录存在，并设置 SELinux context
     ensure_dir_exists(defs::MODULE_UPDATE_DIR)?;
     setsyscon(defs::MODULE_UPDATE_DIR)?;
 
-    // Prepare target directory
+    // 准备目标目录
     println!("- Installing to {}", updated_dir.display());
     ensure_clean_dir(&updated_dir)?;
     info!("target dir: {}", updated_dir.display());
 
-    // Extract zip to target directory
+    // 将 zip 解压到目标目录
     println!("- Extracting module files");
     let file = File::open(zip)?;
     let mut archive = zip::ZipArchive::new(file)?;
     archive.extract(&updated_dir)?;
-    // Only installer.sh may request a hot install, not a file shipped in the zip
+    // 只有 installer.sh 可以请求热安装，zip 中自带的文件不行
     std::fs::remove_file(updated_dir.join(defs::HOT_INSTALL_MARKER)).ok();
 
-    // Set permission and selinux context for $MOD/system
+    // 为 $MOD/system 设置权限和 selinux context
     let module_system_dir = updated_dir.join("system");
     if module_system_dir.exists() {
         set_permissions(&module_system_dir, Permissions::from_mode(0o755))?;
         restore_syscon(&module_system_dir)?;
     }
 
-    // Execute install script
+    // 执行安装脚本
     println!("- Running module installer");
     exec_install_script(zip, is_metamodule, module_id)?;
 
@@ -819,7 +876,7 @@ fn install_module_to_system(zip: &str) -> Result<String> {
     }
 
     let module_dir = Path::new(MODULE_DIR).join(module_id);
-    // A metamodule doing its own hot install may have moved the marker into the live dir
+    // 自行热安装的 metamodule 可能已把标记文件移动到实际模块目录
     std::fs::remove_file(module_dir.join(defs::HOT_INSTALL_MARKER)).ok();
     ensure_dir_exists(&module_dir)?;
     copy(
@@ -828,7 +885,7 @@ fn install_module_to_system(zip: &str) -> Result<String> {
     )?;
     ensure_file_exists(module_dir.join(UPDATE_FILE_NAME))?;
 
-    // Create symlink for metamodule
+    // 为 metamodule 创建符号链接
     if is_metamodule {
         println!("- Creating metamodule symlink");
         metamodule::ensure_symlink(&module_dir)?;
@@ -840,6 +897,8 @@ fn install_module_to_system(zip: &str) -> Result<String> {
     Ok(module_id.to_owned())
 }
 
+/// `ksud module install` 的 CLI 入口：先检查 UAPI 兼容性，再操作磁盘状态，
+/// 最后刷新 preinit。
 pub fn install_module(zip: &str) -> Result<()> {
     ksucalls::ensure_uapi_version_matched()?;
 
@@ -861,7 +920,7 @@ pub fn undo_uninstall_module(id: &str) -> Result<()> {
     let module_path = Path::new(defs::MODULE_DIR).join(id);
     ensure!(module_path.exists(), "Module {id} not found");
 
-    // Remove the remove mark
+    // 移除 remove 标记
     let remove_file = module_path.join(defs::REMOVE_FILE_NAME);
     if remove_file.exists() {
         std::fs::remove_file(&remove_file)
@@ -876,13 +935,15 @@ pub fn undo_uninstall_module(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// 把模块标记为待删除；`prune_modules` 会在下次 post-fs-data 删除它，
+/// 因此不影响当前这次启动。
 pub fn uninstall_module(id: &str) -> Result<()> {
     validate_module_id(id)?;
 
     let module_path = Path::new(defs::MODULE_DIR).join(id);
     ensure!(module_path.exists(), "Module {id} not found");
 
-    // Mark for removal
+    // 标记为待删除
     let remove_file = module_path.join(defs::REMOVE_FILE_NAME);
     File::create(remove_file).with_context(|| "Failed to create remove file")?;
 
@@ -958,7 +1019,7 @@ pub fn uninstall_all_modules() -> Result<()> {
 }
 
 fn mark_all_modules(flag_file: &str) -> Result<()> {
-    // we assume the module dir is already mounted
+    // 假定模块目录已经挂载
     let dir = std::fs::read_dir(defs::MODULE_DIR)?;
     for entry in dir.flatten() {
         let path = entry.path();
@@ -971,7 +1032,7 @@ fn mark_all_modules(flag_file: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read module.prop from the given module path and return as a HashMap
+/// 从给定模块路径读取 module.prop，并以 HashMap 形式返回
 pub fn read_module_prop(module_path: &Path) -> Result<HashMap<String, String>> {
     let module_prop = module_path.join("module.prop");
     ensure!(
@@ -993,7 +1054,7 @@ pub fn read_module_prop(module_path: &Path) -> Result<HashMap<String, String>> {
     Ok(prop_map)
 }
 
-/// Resolve a module icon path to an absolute on-disk path
+/// 把模块图标路径解析为磁盘上的绝对路径
 fn resolve_module_icon_path(
     module_prop_map: &mut HashMap<String, String>,
     key: &str,
@@ -1042,8 +1103,12 @@ fn resolve_module_icon_path(
     }
 }
 
+/// 构造供 Manager 使用的 JSON 模块列表。
+///
+/// 除 module.prop 字段外，还会附加派生标志（enabled、update、remove、web、
+/// action、mount）、配置覆盖项以及模块的 preinit 状态。
 fn list_module(path: &str) -> Vec<HashMap<String, String>> {
-    // Load all module configs once to minimize I/O overhead
+    // 一次性加载所有模块配置，尽量减少 I/O 开销
     let all_configs = match crate::module_config::get_all_module_configs() {
         Ok(configs) => configs,
         Err(e) => {
@@ -1054,7 +1119,7 @@ fn list_module(path: &str) -> Vec<HashMap<String, String>> {
 
     let preinit_states = crate::preinit::module_states();
 
-    // first check enabled modules
+    // 先检查已启用的模块
     let dir = std::fs::read_dir(path);
     let Ok(dir) = dir else {
         return Vec::new();
@@ -1078,7 +1143,7 @@ fn list_module(path: &str) -> Vec<HashMap<String, String>> {
             }
         };
 
-        // If id is missing or empty, use directory name as fallback
+        // 若 id 缺失或为空，则回退为目录名
         if !module_prop_map.contains_key("id") || module_prop_map["id"].is_empty() {
             if let Some(id) = entry.file_name().to_str() {
                 info!("Use dir name as module id: {id}");
@@ -1089,7 +1154,9 @@ fn list_module(path: &str) -> Vec<HashMap<String, String>> {
             }
         }
 
-        // Add enabled, update, remove, web, action flags
+        // Manager 渲染模块卡片所用的派生标志。`mount` 沿用 Magisk 的
+        // skip_mount 约定：存在 system/ 目录即表示模块希望覆盖分区，
+        // 除非存在 skip_mount。
         let enabled = !path.join(defs::DISABLE_FILE_NAME).exists();
         let update = path.join(defs::UPDATE_FILE_NAME).exists();
         let remove = path.join(defs::REMOVE_FILE_NAME).exists();
@@ -1113,16 +1180,16 @@ fn list_module(path: &str) -> Vec<HashMap<String, String>> {
         resolve_module_icon_path(&mut module_prop_map, "actionIcon", &path);
         resolve_module_icon_path(&mut module_prop_map, "webuiIcon", &path);
 
-        // Apply module config overrides and extract managed features
+        // 应用模块配置覆盖项，并提取受管理的功能
         if let Some(module_id) = module_prop_map.get("id")
             && let Some(config) = all_configs.get(module_id.as_str())
         {
-            // Apply override.description
+            // 应用 override.description
             if let Some(desc) = config.get("override.description") {
                 module_prop_map.insert("description".to_owned(), desc.clone());
             }
 
-            // Extract managed features from manage.* config entries
+            // 从 manage.* 配置项中提取受管理的功能
             let managed_features: Vec<String> = config
                 .iter()
                 .filter_map(|(k, v)| {
@@ -1152,14 +1219,14 @@ pub fn list_modules() -> Result<()> {
     Ok(())
 }
 
-/// Get all managed features from active modules
-/// Modules declare managed features via config system (manage.<feature>=true)
-/// Returns: HashMap<ModuleId, Vec<ManagedFeature>>
+/// 获取所有活动模块的受管理功能
+/// 模块通过配置系统声明受管理的功能（manage.<feature>=true）
+/// 返回：HashMap<ModuleId, Vec<ManagedFeature>>
 pub fn get_managed_features() -> Result<HashMap<String, Vec<String>>> {
     let mut managed_features_map: HashMap<String, Vec<String>> = HashMap::new();
 
     foreach_active_module(|module_path| {
-        // Get module ID
+        // 获取模块 ID
         let Some(module_id) = module_path.file_name().and_then(|n| n.to_str()) else {
             warn!(
                 "Failed to get module id from path: {}",
@@ -1168,20 +1235,20 @@ pub fn get_managed_features() -> Result<HashMap<String, Vec<String>>> {
             return Ok(());
         };
 
-        // Read module config
+        // 读取模块配置
         let config = match crate::module_config::merge_configs(module_id) {
             Ok(c) => c,
             Err(e) => {
                 warn!("Failed to merge configs for module '{module_id}': {e}");
-                return Ok(()); // Skip this module
+                return Ok(()); // 跳过该模块
             }
         };
 
-        // Extract manage.* config entries
+        // 提取 manage.* 配置项
         let mut feature_list = Vec::new();
         for (key, value) in &config {
             if key.starts_with("manage.") {
-                // Parse feature name
+                // 解析功能名
                 if let Some(feature_name) = key.strip_prefix("manage.")
                     && crate::module_config::parse_bool_config(value)
                 {

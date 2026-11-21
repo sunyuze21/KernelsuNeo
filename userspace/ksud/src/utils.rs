@@ -1,3 +1,6 @@
+//! 通用小工具：文件/目录初始化、Android 属性读取、命名空间与 cgroup 切换、
+//! 守护进程化，以及安装/卸载入口。
+
 use anyhow::{Context, Error, Ok, Result, bail};
 use rustix::fs::{Mode, OFlags, open};
 use rustix::process::setpgid;
@@ -28,6 +31,8 @@ use rustix::{
     thread::{LinkNameSpaceType, move_into_link_name_space},
 };
 
+// 直接绑定 bionic 的属性 API。若每次读取都调用 getprop(1)，启动早期会频繁
+// fork 进程，代价过高。
 type PropertyReadCallback = unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, u32);
 
 unsafe extern "C" {
@@ -39,6 +44,7 @@ unsafe extern "C" {
     );
 }
 
+/// 在编译期选择调试版或发布版取值。
 #[macro_export]
 macro_rules! debug_select {
     ($debug:expr, $release:expr) => {{
@@ -86,6 +92,10 @@ pub fn ensure_dir_exists<T: AsRef<Path>>(dir: T) -> Result<()> {
     }
 }
 
+/// 把 `contents` 写成可执行文件 `path`。
+///
+/// `ignore_if_exist` 为真时保留已有文件；否则先 unlink 再写入，从调用方视角
+/// 看相当于替换。
 pub fn ensure_binary<T: AsRef<Path>>(
     path: T,
     contents: &[u8],
@@ -114,6 +124,8 @@ pub fn ensure_binary<T: AsRef<Path>>(
     Ok(())
 }
 
+/// 由 `__system_property_read_callback` 同步回调；cookie 是 `getprop` 持有的
+/// `*mut Option<String>`。
 unsafe extern "C" fn property_read_callback(
     cookie: *mut c_void,
     _name: *const c_char,
@@ -129,6 +141,7 @@ unsafe extern "C" fn property_read_callback(
     *result = Some(value.to_string_lossy().into_owned());
 }
 
+/// 读取 Android 系统属性；属性不存在时返回 `None`。
 pub fn getprop(name: &str) -> Option<String> {
     let name = CString::new(name).ok()?;
     let property_info = unsafe { __system_property_find(name.as_ptr()) };
@@ -147,6 +160,8 @@ pub fn getprop(name: &str) -> Option<String> {
     value
 }
 
+/// 安全模式可能来自 Android 属性（用户开机时按键设置），也可能来自 LKM
+/// 延迟加载机制持久化的内核标志。
 pub fn is_safe_mode() -> bool {
     let safemode = getprop("persist.sys.safemode")
         .as_ref()
@@ -172,6 +187,9 @@ pub fn get_zip_uncompressed_size(zip_path: &str) -> Result<u64> {
     Ok(total)
 }
 
+/// 加入另一个进程的挂载命名空间（pid 1 即 init/全局命名空间）。
+///
+/// setns 会重置进程的根目录/当前目录视图，因此若原当前目录仍可达则重新设置。
 pub fn switch_mnt_ns(pid: i32) -> Result<()> {
     use rustix::{
         fd::AsFd,
@@ -187,6 +205,8 @@ pub fn switch_mnt_ns(pid: i32) -> Result<()> {
     Ok(())
 }
 
+/// 通过写入 `cgroup.procs` 把 pid 移入 `grp`；不同 Android 版本缺失某些
+/// cgroup 层级很常见，这里静默忽略。
 fn switch_cgroup(grp: &str, pid: u32) {
     let path = Path::new(grp).join("cgroup.procs");
     if !path.exists() {
@@ -199,12 +219,14 @@ fn switch_cgroup(grp: &str, pid: u32) {
     }
 }
 
+/// 让进程脱离调用者的 cgroup，避免 root 进程随启动它的应用一起被限流或杀死。
 pub fn switch_cgroups() {
     let pid = std::process::id();
     switch_cgroup("/acct", pid);
     switch_cgroup("/dev/cg2_bpf", pid);
     switch_cgroup("/sys/fs/cgroup", pid);
 
+    // 大多数设备存在按应用划分的 memcg；该属性可将其禁用。
     if getprop("ro.config.per_app_memcg")
         .as_ref()
         .is_none_or(|prop| prop != "false")
@@ -230,17 +252,21 @@ fn link_ksud_to_bin() -> Result<()> {
     Ok(())
 }
 
+/// 把 ksud 及其内嵌资源安装到 /data/adb。
+///
+/// `libadbroot` 和 `data_path` 由 APK 安装器传入：前者是解压出的 adb root
+/// 辅助库，后者是安装器暂存启动镜像备份的位置。
 pub fn install(libadbroot: Option<PathBuf>, data_path: Option<PathBuf>) -> Result<()> {
     ensure_dir_exists(defs::ADB_DIR)?;
     let _ = std::fs::remove_file(defs::DAEMON_PATH);
     std::fs::copy(
-        // We should use /proc/self/exe, DO NOT resolve the real path
-        // So that if someone execute /data/adb/ksud install, ksud won't be removed unexpectedly
+        // 应使用 /proc/self/exe，切勿解析出真实路径，
+        // 这样即使用户执行 /data/adb/ksud install，ksud 也不会被意外删除
         "/proc/self/exe",
         defs::DAEMON_PATH,
     )?;
     restorecon::lsetfilecon(defs::DAEMON_PATH, restorecon::KSU_CON)?;
-    // install binary assets
+    // 安装二进制资源
     assets::ensure_binaries(false).with_context(|| "Failed to extract assets")?;
 
     link_ksud_to_bin()?;
@@ -276,6 +302,8 @@ pub fn install(libadbroot: Option<PathBuf>, data_path: Option<PathBuf>) -> Resul
     Ok(())
 }
 
+/// 从设备上移除 KernelSU：模块、私有状态、启动镜像备份，最后卸载 Manager
+/// APK。成功后重启。
 pub fn uninstall(package_name: &str) -> Result<()> {
     if Path::new(defs::MODULE_DIR).exists() {
         println!("- Uninstall modules..");
@@ -306,6 +334,7 @@ pub fn uninstall(package_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// 把标准输入输出重定向到 /dev/null，标准的守护进程清理步骤。
 pub fn reset_std() -> Result<()> {
     let null_fd = open("/dev/null", OFlags::RDWR, Mode::empty())?;
     dup2_stdin(&null_fd)?;
@@ -336,6 +365,11 @@ pub fn create_daemon_with<F: FnOnce() -> Result<()>>(
     create_daemon_impl(use_init_pgrp, configure)
 }
 
+/// 双 fork 守护进程化。
+///
+/// 原父进程中返回 `false`（此时已回收第一个子进程），最终守护进程中返回
+/// `true`。`configure` 在两次 fork 之间执行，以便在完全脱离前加入目标
+/// cgroup/会话。
 fn create_daemon_impl<F: FnOnce() -> Result<()>>(
     use_init_pgrp: bool,
     configure: F,
@@ -389,6 +423,8 @@ fn create_daemon_impl<F: FnOnce() -> Result<()>>(
     Ok(true)
 }
 
+/// 优先使用内核的 `set_init_pgrp` supercall（加入 init 进程组，使守护进程
+/// 不随启动者退出）；失败时回退到普通 setpgid。
 pub fn detach_process_group(use_init_pgrp: bool) {
     if use_init_pgrp {
         if let Err(e) = ksucalls::set_init_pgrp() {

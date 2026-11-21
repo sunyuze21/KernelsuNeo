@@ -4,7 +4,7 @@
 
 - For significant features or refactors, sketch an Plan first; keep it updated as you work.
 - Use Context7 to pull library/API docs when you touch unfamiliar crates, Android APIs, or JS deps.
-- Default to `rg` for searching and keep edits ASCII unless the file already uses non-ASCII.
+- Default to `rg` for searching. Write code comments in Chinese (UTF-8); keep code identifiers and other edits ASCII unless the file already uses non-ASCII.
 - Run the component-specific checks below before handing work off; do not skip failing steps.
 - When unsure which path to take, favor minimal risk changes that keep kernel/userspace contracts intact.
 

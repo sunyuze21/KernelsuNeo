@@ -1,5 +1,43 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+//! `boot-patch-v2`：把一个预编译好的 `kernelsu.ko` 注入 boot 镜像中未压缩的
+//! ARM64 内核 `Image`。
+//!
+//! 这是与 `boot_patch` 中基于 ramdisk 的流程并列的第二套启动修补方案。原来的
+//! `boot_patch` 会解包 ramdisk、加入一小段 userspace/init 钩子，再由 Android 的
+//! `init` 尽早加载 KernelSU。`boot-patch-v2` 完全不碰用户态：它把 KernelSU 当作
+//! 可加载内核模块，让内核自己在启动早期加载。对于 ramdisk 难以修改（AVB、
+//! vendor_boot、GKI ramdisk 分片）以及模块必须在 `init` 之前运行的设备很有用。
+//!
+//! `patch_boot` 与 `inject_image` 的完整流程：
+//!
+//! 1. 用 `android_bootimg` crate 解析 boot 镜像（boot header v3/v4 与 vendor_boot
+//!    布局由该 crate 处理），并解压内核块。结果必须是未压缩的原始 ARM64 `Image`
+//!    （magic `ARM\x64` 位于 0x38，大小位于 0x10）；`zImage` 或压缩的 `Image.*`
+//!    会被拒绝。
+//! 2. 扫描镜像内嵌的 kallsyms 数据恢复符号表（兼容 6.4 之前和 6.4+ 两种布局），
+//!    如果存在 vmlinux BTF，则用 `__start_BTF`/`__stop_BTF` 符号确认是哪一块 BTF。
+//!    此流程依赖 CONFIG_KALLSYMS_ALL，否则会直接报错退出。
+//! 3. 通过解码 AArch64 分支指令定位三处内核代码补丁点：`kernel_init` 中的
+//!    `async_synchronize_full()` 调用、`load_module` 中的 `strndup_user()` 调用，
+//!    以及 `arm64_memblock_init` 中的 `memblock_reserve()` 调用。每一处都必须
+//!    证明唯一，否则宁可停止也不猜测。
+//! 4. 用 kallsyms 解析模块的所有未定义符号并生成 fixup 表；随后在内核 `Image`
+//!    之后追加一个自描述的 capsule，保存模块字节、fixup 表、模块参数和 SHA-256。
+//! 5. 把一段小的 bootstrap 对象（编译期生成的 AArch64 ET_REL blob）重定位到
+//!    `.text` 尾部经过验证的零填充区，再把三处调用点重定向过去。启动时
+//!    memblock 包装函数先把保留区扩展到 capsule，bootstrap 再校验 capsule、
+//!    应用模块 fixup 并调用 `load_module()`。
+//!
+//! 支持的镜像布局：只要能由 `android_bootimg` crate 解析并重新打包，且内核块是
+//! 原始 ARM64 `Image` 的 boot 镜像均可。这里刻意不修改 ramdisk 压缩格式、cpio
+//! 归档、bootconfig/cmdline 和 AVB footer：只替换内核，其余容器原样重新打包。
+//! 需要重新签名 AVB 或关闭校验的调用方必须另行处理。
+//!
+//! 全流程维持的不变量：capsule 位于原始 `image_size` 之后，bootstrap 只写入
+//! `.text` 内已证明全零的填充区；新的镜像大小按 4096 字节对齐；capsule 可通过
+//! 内核已有的线性映射和 PAGE_OFFSET 访问。
+
 #![allow(
     clippy::many_single_char_names,
     clippy::similar_names,
@@ -18,18 +56,27 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use crate::lkm_image_btf::{KernelBtf, find_btf_candidates};
 use crate::{assets, boot_patch};
 
-// Image, capsule, ELF, and kallsyms wire constants.
+// 镜像、capsule、ELF 与 kallsyms 的线上格式常量。
 
+// `struct arm64_image_header` 中 `image_size` 位于 0x10，小端 magic
+// "ARM\x64" 位于 0x38；这些偏移由 arm64 启动协议固定。
 const ARM64_IMAGE_MAGIC_OFFSET: usize = 0x38;
 const ARM64_IMAGE_MAGIC: &[u8; 4] = b"ARM\x64";
 const ARM64_IMAGE_SIZE_OFFSET: usize = 0x10;
+// capsule 头 magic 为 "KSULKM1"，末尾补 NUL，使该值作为 u64 传给
+// bootstrap 的编译期定义时保持稳定。
 const CAPSULE_MAGIC: &[u8; 8] = b"KSULKM1\0";
 const CAPSULE_VERSION: u32 = 2;
+// capsule 按页对齐，内核可以用映射 Image 的同一页粒度映射它；
+// 最终镜像大小也按此对齐。
 const CAPSULE_ALIGNMENT: usize = 4096;
 const CAPSULE_HEADER_SIZE: usize = 112;
-/// Upper bound of the module params string, excluding the NUL terminator
+/// 模块参数字符串长度上限，不含 NUL 终止符
 const MAX_MODULE_PARAMS_SIZE: usize = 4096;
+// 置位时，capsule 的 fixup 表携带绝对内核地址（SHN_ABS 风格）；
+// bootstrap 只需改写每个符号的 st_value。
 const CAPSULE_FLAG_SHN_ABS_FIXUPS: u64 = 1;
+// 接受的 ELF machine/type 编码；这里全部面向 AArch64。
 const EM_AARCH64: u16 = 183;
 const ET_REL: u16 = 1;
 const SHT_PROGBITS: u32 = 1;
@@ -52,37 +99,53 @@ const R_AARCH64_ADD_ABS_LO12_NC: u32 = 277;
 const ELF64_SECTION_SIZE: usize = 64;
 const ELF64_SYMBOL_SIZE: usize = 24;
 const ELF64_RELA_SIZE: usize = 24;
+// kallsyms 表按 8 字节对齐构建；token 表固定 256 项，每项可用一个
+// 压缩字节索引。
 const KALLSYMS_ALIGNMENT: usize = 8;
 const KALLSYMS_TOKEN_COUNT: usize = 256;
 const KALLSYMS_TOKEN_INDEX_SIZE: usize = KALLSYMS_TOKEN_COUNT * 2;
+// 单个 kallsyms token 不会合法地超过该长度；更长的可打印字节串
+// 说明候选表是误报。
 const KALLSYMS_MAX_TOKEN_LENGTH: usize = 512;
+// token 表附近的搜索范围有上限，避免恶意或损坏的 Image 把恢复过程
+// 变成二次方扫描。
 const KALLSYMS_MARKER_SEARCH_WINDOW: usize = 4 * 1024 * 1024;
 const KALLSYMS_NAME_TAIL_SEARCH: usize = 0x40000;
 const KALLSYMS_MIN_MARKERS: usize = 8;
 const KALLSYMS_MAX_MARKERS: usize = 4096;
+// code cave 必须按指令对齐；优先 4096 对齐，使 cave 从新页开始，
+// 也更不容易与活跃代码共享缓存行。
 const TEXT_CAVE_ALIGNMENT: usize = 16;
 const TEXT_CAVE_PREFERRED_ALIGNMENT: usize = 4096;
+// `struct load_info` 会随 GKI 版本增长；这些值限定 bootstrap 在栈上
+// 分配存储时的范围（类似 alloca 的用法）。
 const MINIMUM_LOAD_INFO_STORAGE_SIZE: u64 = 256;
 const MAXIMUM_LOAD_INFO_STORAGE_SIZE: u64 = 4096;
+// 预编译的 AArch64 ET_REL bootstrap，由构建脚本生成；打补丁时由下面的
+// 极简链接器重定位。
 const BOOTSTRAP_OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lkm_image_bootstrap.o"));
 
-// CLI and top-level result types.
+// CLI 及顶层结果类型。
 
+/// `boot-patch-v2` 子命令的参数。
+///
+/// boot 镜像是必填项；`--module` 可选，因为 ksud 随包提供按 KMI 构建的
+/// `kernelsu.ko`，可以根据 boot 镜像内核里的 release 字符串自动选择。
 #[derive(clap::Args, Debug)]
 pub struct BootPatchV2Args {
-    /// Source boot image
+    /// 源 boot 镜像
     #[arg(short, long)]
     pub boot: PathBuf,
 
-    /// Exact kernelsu.ko; auto-select the embedded KMI build when omitted
+    /// 指定确切的 kernelsu.ko；省略时自动选择内嵌的 KMI 构建
     #[arg(short, long)]
     pub module: Option<PathBuf>,
 
-    /// Patched boot image output
+    /// 打补丁后的 boot 镜像输出路径
     #[arg(short, long)]
     pub output: PathBuf,
 
-    /// Replace an existing output file
+    /// 覆盖已存在的输出文件
     #[arg(long, default_value = "false")]
     pub force: bool,
 
@@ -90,12 +153,18 @@ pub struct BootPatchV2Args {
     pub config: boot_patch::KsuConfigArgs,
 }
 
+/// 一条恢复出来的 kallsyms 记录：链接期虚拟地址和名称。
 #[derive(Clone, Debug)]
 struct MapSymbol {
     address: u64,
     name: String,
 }
 
+/// 按地址排序的 kallsyms 索引。
+///
+/// 查找以名称为准，并做两级归一化：优先精确名称匹配，其次才使用去掉
+/// 编译器后缀的形式。所有使用方都要求地址唯一，因为给歧义符号打补丁会
+/// 静默破坏无关的内核代码。
 #[derive(Debug)]
 struct SymbolMap {
     entries: Vec<MapSymbol>,
@@ -104,6 +173,8 @@ struct SymbolMap {
 }
 
 impl SymbolMap {
+    /// 构建索引：丢弃占位的零地址，并要求至少有一个真实符号，保证后续
+    /// 地址运算有意义。
     fn new(mut entries: Vec<MapSymbol>) -> Result<Self> {
         entries.retain(|entry| entry.address != 0);
         ensure!(
@@ -129,6 +200,10 @@ impl SymbolMap {
         })
     }
 
+    /// 返回归一化名称等于 `requested_name` 的所有不同地址。
+    ///
+    /// 编译器为同一符号生成克隆（`.cold`、`___cfi_*`）时出现多个地址是
+    /// 正常的；需要单一目标的调用方必须把多于一个结果视为错误。
     fn variants(&self, requested_name: &str) -> Vec<MapSymbol> {
         let mut unique = BTreeMap::<u64, MapSymbol>::new();
         if let Some(indices) = self
@@ -145,6 +220,10 @@ impl SymbolMap {
         unique.into_values().collect()
     }
 
+    /// 把符号解析为唯一地址，否则带诊断信息失败。
+    ///
+    /// 即使存在归一化变体，精确名称匹配也优先；否则归一化后的集合必须
+    /// 收敛到唯一地址。
     fn resolve(&self, requested_name: &str) -> Result<MapSymbol> {
         if let Some(indices) = self.by_name.get(requested_name) {
             let mut exact = BTreeMap::<u64, MapSymbol>::new();
@@ -174,10 +253,13 @@ impl SymbolMap {
         bail!("symbol {requested_name:?} is not unique: {rendered}")
     }
 
+    /// 模块符号解析的宽松版本：歧义或缺失时返回 `None`，由调用方记入
+    /// unresolved 并留给内核模块加载器自行解析，而不是让整个注入失败。
     fn resolve_module_symbol(&self, requested_name: &str) -> Option<MapSymbol> {
         self.resolve(requested_name).ok()
     }
 
+    /// 返回严格大于 `address` 的下一个符号地址，用于界定函数扫描范围。
     fn next_address(&self, address: u64) -> Option<u64> {
         self.entries
             .iter()
@@ -186,6 +268,17 @@ impl SymbolMap {
     }
 }
 
+/// 注入流程必需的符号。
+///
+/// 每个符号的用途：
+/// - `_text`/`_end` 建立文件偏移到地址的映射，并校验 image_size。
+/// - `_stext`/`_etext` 界定搜索 code cave 的可执行区域。
+/// - `linux_banner` 提供内核 release，用于选择对应 KMI 的模块。
+/// - 三个调用点（`kernel_init`、`load_module`、`arm64_memblock_init` 及其
+///   被调用者）是启动 bootstrap 和解析镜像保留区的钩子。
+/// - `memstart_addr`/`kimage_voffset` 用于在 bootstrap 内转换物理地址和
+///   虚拟地址。
+/// - `vmalloc`、`memcpy`、`kstrdup` 供 bootstrap 辅助函数使用。
 #[derive(Debug)]
 struct RequiredSymbols {
     image_base: MapSymbol,
@@ -207,6 +300,8 @@ struct RequiredSymbols {
 }
 
 impl RequiredSymbols {
+    /// 解析全部必需符号；`vmalloc_noprof` 可作为 `vmalloc` 的新拼写，
+    /// 以兼容 fault injection 重构后加上的 `_noprof` 后缀。
     fn resolve(symbols: &SymbolMap) -> Result<Self> {
         let vmalloc = symbols.resolve("vmalloc").or_else(|primary_error| {
             symbols
@@ -237,6 +332,11 @@ impl RequiredSymbols {
         self.image_base.address
     }
 
+    /// 用头部 `image_size` 交叉校验 `_end - _text`，并确认每个必需符号都
+    /// 落在文件镜像内。
+    ///
+    /// 这是防止解析到截断或重定位镜像的主要防线：两个独立大小来源一旦
+    /// 不一致，后续结果都不可信。
     fn validate_image_bounds(&self, image_size: usize) -> Result<()> {
         let image_base = self.image_base();
         let image_end_offset = self
@@ -300,6 +400,8 @@ impl RequiredSymbols {
     }
 }
 
+/// 一条被改写的 `BL` 指令：文件偏移、虚拟地址（重编码分支需要）以及它
+/// 原本调用的地址。
 #[derive(Clone, Copy, Debug)]
 struct CallSite {
     file_offset: usize,
@@ -307,6 +409,8 @@ struct CallSite {
     target: u64,
 }
 
+/// `inject_image` 改写的三处代码位置，外加 bootstrap 转换 capsule 所需的
+/// PAGE_OFFSET。
 #[derive(Clone, Copy, Debug)]
 struct PatchSites {
     async_call: CallSite,
@@ -315,12 +419,21 @@ struct PatchSites {
     page_offset: u64,
 }
 
+/// 一个已解析到内核文件偏移的模块未定义符号。
+///
+/// `symbol_file_offset` 指向模块内 24 字节的 ELF64 符号记录；bootstrap 会
+/// 改写该记录的 `st_value` 和 `st_shndx`，让内核模块加载器看到 SHN_ABS
+/// 地址。
 #[derive(Debug)]
 struct Fixup {
     symbol_file_offset: usize,
     kernel_offset: u64,
 }
 
+/// 追加在内核镜像末尾、携带模块及元数据的尾部数据。
+///
+/// `data` 是写入 `file_offset` 的精确字节；其余字段是绝对位置，用于生成
+/// bootstrap 的编译期定义并校验最终镜像布局。
 #[derive(Debug)]
 struct Capsule {
     data: Vec<u8>,
@@ -332,28 +445,43 @@ struct Capsule {
     args_size: usize,
 }
 
+/// 扫描原始 Image 得到的 kallsyms 结果。
 #[derive(Debug)]
 struct RecoveredKallsyms {
     symbols: SymbolMap,
+    /// "pre-6.4" 或 "6.4+"，仅用于诊断输出。
     layout: &'static str,
     count: usize,
 }
 
+/// kallsyms 以及可恢复时对应的 vmlinux BTF。
 #[derive(Debug)]
 struct RecoveredKernelMetadata {
     kallsyms: RecoveredKallsyms,
     btf: Option<KernelBtf>,
 }
 
+/// 未作为符号导出的内核 ABI 事实。
+///
+/// GKI 模块加载器会在栈上分配 `struct load_info`，并从其中的固定偏移读取
+/// ELF 头和长度；这些偏移随结构体增长而变化。有 BTF 时以真实布局为准，
+/// 这些值是经过验证的回退值。
 #[derive(Clone, Copy, Debug)]
 struct GkiAbi {
+    /// 若有 BTF 能确定，则为真实的 `sizeof(struct load_info)`。
     load_info_structure_size: Option<u64>,
+    /// 栈上预留的字节数，由结构体大小向上对齐得到。
     load_info_storage_size: u64,
+    /// `struct load_info` 内保存 ELF 头的字段偏移。
     load_info_hdr_offset: u64,
+    /// `struct load_info` 内保存模块长度的字段偏移。
     load_info_len_offset: u64,
+    /// 传给模块分配/加载路径的 GFP 标志（arm64 GKI 上 GFP_KERNEL 为 0xcc0）。
     gfp_kernel: u64,
 }
 
+// 没有 BTF 或 BTF 无法解析时的回退 ABI。0xcc0 是 arm64 GKI 构建中
+// GFP_KERNEL 的数值。
 const GKI_ABI: GkiAbi = GkiAbi {
     load_info_structure_size: None,
     load_info_storage_size: MINIMUM_LOAD_INFO_STORAGE_SIZE,
@@ -363,6 +491,10 @@ const GKI_ABI: GkiAbi = GkiAbi {
 };
 
 impl GkiAbi {
+    /// 用 BTF 推导的 `load_info` 布局覆盖内置回退值。
+    ///
+    /// 存储大小向上取整到 16 字节，保证栈分配自然对齐；再由 `validate`
+    /// 限制到可接受范围。
     fn apply_btf(mut self, btf: &KernelBtf) -> Result<Self> {
         if let Some(layout) = btf.load_info {
             self.load_info_structure_size = Some(layout.structure_size);
@@ -378,6 +510,9 @@ impl GkiAbi {
         Ok(self)
     }
 
+    /// 拒绝 bootstrap 无法安全使用的布局：存储必须是 16 字节对齐且范围
+    /// 合理，结构体必须能放进存储，两个被访问字段必须 8 字节对齐并完全
+    /// 位于结构体内。
     fn validate(self) -> Result<()> {
         ensure!(
             self.load_info_storage_size > 0
@@ -405,6 +540,7 @@ impl GkiAbi {
     }
 }
 
+/// 恢复过程中选中的 BTF blob 的可读摘要。
 #[derive(Clone, Copy, Debug)]
 struct BtfReport {
     file_offset: usize,
@@ -412,6 +548,8 @@ struct BtfReport {
     type_count: usize,
 }
 
+/// `patch_boot` 在注入成功后打印的全部信息；与补丁字节分离，使
+/// `inject_image` 保持纯粹、可测试。
 #[derive(Debug)]
 struct ImageInjectionReport {
     kernel_release: String,
@@ -431,8 +569,12 @@ struct ImageInjectionReport {
     image_size: usize,
 }
 
-// Little-endian buffer helpers.
+// 小端字节序缓冲区辅助函数。
 
+/// 去掉编译器给符号名添加的装饰。
+///
+/// kallsyms 中可能出现 `sym.cold`、`sym.llvm.123`、`sym$...` 以及 CFI
+/// 跳转表别名；它们都不是我们查找意义上的独立函数。
 fn normalize_symbol(name: &str) -> &str {
     let mut end = name.len();
     for marker in ["$", ".llvm."] {
@@ -444,10 +586,13 @@ fn normalize_symbol(name: &str) -> &str {
     name.strip_suffix(".cfi_jt").unwrap_or(name)
 }
 
+/// 向上取整到 2 的幂对齐。调用方必须传入 2 的幂；这是用于已校验对齐值
+/// 的未检查版本。
 const fn align_up(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
 }
 
+/// `align_up` 的 u64 检查版本，溢出时返回 `None`。
 const fn align_up_u64(value: u64, alignment: u64) -> Option<u64> {
     match value.checked_add(alignment - 1) {
         Some(value) => Some(value & !(alignment - 1)),
@@ -455,11 +600,15 @@ const fn align_up_u64(value: u64, alignment: u64) -> Option<u64> {
     }
 }
 
+/// 带边界检查的不可变切片访问；所有解析路径都经过它，畸形偏移会返回
+/// 错误而不是 panic。
 fn get_slice(data: &[u8], offset: usize, size: usize) -> Result<&[u8]> {
     data.get(offset..offset.saturating_add(size))
         .ok_or_else(|| anyhow!("offset 0x{offset:x} size 0x{size:x} is outside input"))
 }
 
+/// ARM64 Image 头、ELF 对象和 capsule 中的多字节值都是小端，与
+/// arm64/kernel ABI 和 AArch64 ELF 一致。
 fn read_u16(data: &[u8], offset: usize) -> Result<u16> {
     Ok(u16::from_le_bytes(get_slice(data, offset, 2)?.try_into()?))
 }
@@ -490,6 +639,8 @@ fn write_u64(data: &mut [u8], offset: usize, value: u64) -> Result<()> {
     Ok(())
 }
 
+/// 带边界检查的可变切片访问；offset + size 的加法也要检查，因为两者都
+/// 可能来自不可信的 capsule/布局运算。
 fn get_slice_mut(data: &mut [u8], offset: usize, size: usize) -> Result<&mut [u8]> {
     let end = offset
         .checked_add(size)
@@ -508,8 +659,16 @@ fn find_subslice(data: &[u8], needle: &[u8], start: usize) -> Option<usize> {
         .map(|position| position + start)
 }
 
-// Kallsyms recovery.
+// kallsyms 恢复。
 
+/// 尝试解析位于 `start` 的 kallsyms token 表。
+///
+/// token 表由 256 个连续的、以 NUL 结尾的 ASCII token 组成。`digit_offset`
+/// 是单字符 token `"0"` 所在的文件偏移；由于第 48 个 token 恒为 `"0"`，
+/// 它可作为表起点的锚点。随后的 256 个 u16 索引项必须逐个精确指回对应
+/// token。
+///
+/// 返回 token 列表和 u16 索引的文件偏移。
 fn parse_kallsyms_token_table_at(
     image: &[u8],
     start: usize,
@@ -572,6 +731,11 @@ fn parse_kallsyms_token_table_at(
     Some((tokens, token_index_offset))
 }
 
+/// 在 Image 中定位所有可能的 token 表。
+///
+/// 搜索以必然出现的 `"0\0" ... "9\0"` 字节串为线索，然后在候选起点附近
+/// 按对齐向后回退，寻找真正的表头。BTreeMap 按起点去重，并保证扫描顺序
+/// 确定。
 fn find_kallsyms_token_tables(image: &[u8]) -> Vec<(Vec<Vec<u8>>, usize, usize)> {
     let mut digit_tokens = Vec::with_capacity(20);
     for value in b'0'..=b'9' {
@@ -600,6 +764,10 @@ fn find_kallsyms_token_tables(image: &[u8]) -> Vec<(Vec<Vec<u8>>, usize, usize)>
     candidates.into_values().collect()
 }
 
+/// 读取 names 表之前的 markers 数组。
+///
+/// markers 是每 256 个符号一个的累计字节偏移，必须严格递增且差值合理
+/// （0x200..=0x40000）。要求最少条数可以避免误匹配到其他单调递增数据。
 fn read_kallsyms_markers(image: &[u8], start: usize, limit: usize) -> Vec<u32> {
     if !start.is_multiple_of(KALLSYMS_ALIGNMENT) || start.saturating_add(8) > limit {
         return Vec::new();
@@ -636,6 +804,11 @@ fn read_kallsyms_markers(image: &[u8], start: usize, limit: usize) -> Vec<u32> {
     }
 }
 
+/// 把 names blob 切分成 `count` 个符号的 `(偏移, 长度)` 区间。
+///
+/// 6.4 之前用一个字节存长度；6.4+ 为支持超过 127 的长度改用 ULEB128，
+/// 因此需要 `uleb128_lengths`。函数会校验不变量：每第 256 个符号必须从
+/// 对应 marker 开始，且表必须恰好结束在（零填充的）markers 偏移处。
 fn parse_kallsyms_name_spans(
     image: &[u8],
     names_offset: usize,
@@ -690,6 +863,11 @@ fn parse_kallsyms_name_spans(
     Some(spans)
 }
 
+/// 用 token 表展开压缩的 kallsyms 名称。
+///
+/// 每个名称是若干 token 索引；展开后的第一个字节是符号类型，其余是名称。
+/// 要求 `_text`、`_end` 和 `load_module` 必须出现，是一个廉价的一致性
+/// 检查，可排除偶然匹配的数据。
 fn decode_kallsyms_names(
     image: &[u8],
     spans: &[(usize, usize)],
@@ -733,8 +911,15 @@ fn decode_kallsyms_names(
     Some(decoded)
 }
 
+/// (num_syms 偏移, names 偏移, markers 偏移, 解码后的名称)
 type KallsymsNameTable = (usize, usize, usize, Vec<(u8, String)>);
 
+/// 查找与给定 token 表一致的 names 表。
+///
+/// markers 数组在 token 表之前的有界窗口内搜索。根据最后一个 marker 可以
+/// 估算 names blob 的起点，然后按对齐向前回退，寻找合理的 `num_syms` u32
+/// 以及紧随其后的四个零字节。新、旧两种名称编码都会尝试，因为仅凭布局
+/// 无法判断镜像来自哪个内核系列。
 fn find_kallsyms_names(
     image: &[u8],
     tokens: &[Vec<u8>],
@@ -806,10 +991,22 @@ fn find_kallsyms_names(
     recovered
 }
 
+/// 判断是否为高半区的规范 arm64 内核虚拟地址：高 16 位为 0xffff 且按页
+/// 对齐。用于排除随机 u64 值。
 const fn is_arm64_kernel_address(address: u64) -> bool {
     address >> 48 == 0xffff && address.is_multiple_of(4096)
 }
 
+/// 把最终的地址数组解码成符号。
+///
+/// 存在两种编码。较老的内核直接存 u64 绝对地址；5.10+ 存相对基地址的
+/// 有符号 32 位偏移，基地址位于 offsets 数组之后；启用
+/// CONFIG_KALLSYMS_ABSOLUTE_PERCPU 时，非负项是绝对地址（percpu 符号），
+/// 负值项解码为 `base - 1 - offset`。下面的符号判断会选择占多数的编码。
+///
+/// 校验刻意严格：地址必须单调，`_text` 必须等于相对基地址，
+/// `_end - _text` 必须等于 `image_size`，且至少 90% 的非绝对符号必须落在
+/// 镜像内。正是这些条件让恢复在没有符号表的情况下仍然安全。
 fn decode_kallsyms_addresses(
     image: &[u8],
     image_size: usize,
@@ -907,6 +1104,11 @@ fn decode_kallsyms_addresses(
     )
 }
 
+/// 确认 BTF blob 的文件范围与恢复出的 `__start_BTF` / `__stop_BTF` 符号
+/// 一致。
+///
+/// Image 中可能嵌入多个无关的 BTF blob（例如 BPF skeleton）；只有被上述
+/// kallsyms 符号界定的那个才是 vmlinux BTF。
 fn validate_kallsyms_btf_boundaries(
     symbols: &SymbolMap,
     btf_file_offset: usize,
@@ -934,6 +1136,12 @@ fn validate_kallsyms_btf_boundaries(
     Ok(())
 }
 
+/// 从原始 ARM64 Image 恢复内核符号表（以及可选的 BTF）。
+///
+/// 策略：枚举所有可能的 token 表，再枚举与其一致的 names 表，然后尝试
+/// 两种地址布局。若存在 BTF 候选，用 `__start_BTF`/`__stop_BTF` 边界检查
+/// 选择正确的一个；若没有候选匹配，则仅在 kallsyms 候选恰好唯一时使用
+/// BTF。任何歧义都会报错：选错会把模块符号解析到错误地址。
 fn recover_arm64_kernel_metadata(image: &[u8]) -> Result<RecoveredKernelMetadata> {
     let image_size = parse_arm64_image_size(image)?;
     let btf_candidates = find_btf_candidates(image);
@@ -979,8 +1187,8 @@ fn recover_arm64_kernel_metadata(image: &[u8]) -> Result<RecoveredKernelMetadata
         }
     }
 
-    // Built-in BPF skeletons can embed independent raw BTF blobs. Only the
-    // candidate delimited by this kallsyms table belongs to vmlinux.
+    // 内建的 BPF skeleton 可能嵌入彼此独立的原始 BTF blob。只有被
+    // 这张 kallsyms 表限定在同一范围内的候选项才属于 vmlinux。
     let mut boundary_matches = Vec::new();
     for (kallsyms_index, kallsyms) in candidates.iter().enumerate() {
         for (btf_index, btf) in btf_candidates.iter().enumerate() {
@@ -1025,6 +1233,11 @@ fn recover_arm64_kernel_metadata(image: &[u8]) -> Result<RecoveredKernelMetadata
     })
 }
 
+/// 读取并校验 ARM64 Image 的大小字段。
+///
+/// 头部至少 64 字节，且 0x38 处必须有 magic，这也会拒绝 zImage/压缩载荷。
+/// `image_size` 是可加载大小，具有权威性：其后的字节是追加的元数据
+/// （DTB 等），本补丁器拒绝保留它们。
 fn parse_arm64_image_size(image: &[u8]) -> Result<usize> {
     ensure!(
         image.len() >= 64,
@@ -1042,8 +1255,13 @@ fn parse_arm64_image_size(image: &[u8]) -> Result<usize> {
     usize::try_from(image_size).context("ARM64 Image image_size does not fit this host")
 }
 
-// GKI ABI and ARM64 patch-site analysis.
+// GKI ABI 与 ARM64 补丁点分析。
 
+/// 恢复内核 release 字符串和 GKI `load_info` ABI。
+///
+/// `linux_banner` 是形如 "Linux version 6.1.75-android14-..." 的
+/// NUL 结尾 C 字符串；前缀之后第一个以空白分隔的 token 就是 release。
+/// 只接受经过验证的 GKI 系列，因为下面依赖的调用点特征仅在那些版本已知。
 fn recover_gki_abi(
     image: &[u8],
     image_base: u64,
@@ -1095,6 +1313,10 @@ fn recover_gki_abi(
     Ok((release.to_owned(), abi))
 }
 
+/// 把 `BL` 指令解码为绝对目标地址。
+///
+/// AArch64 `BL` 在 bit 31..26 为操作码 `0b100101`，bit 25..0 是 26 位有符号
+/// 字位移。立即数从 bit 25 符号扩展后乘以 4。
 fn decode_bl_target(instruction: u32, source_address: u64) -> Option<u64> {
     if instruction & 0xfc00_0000 != 0x9400_0000 {
         return None;
@@ -1103,6 +1325,8 @@ fn decode_bl_target(instruction: u32, source_address: u64) -> Option<u64> {
     source_address.checked_add_signed(immediate)
 }
 
+/// 从 `source_address` 到 `target_address` 编码 `BL`，并强制 26 位位移的
+/// 4 字节对齐和 ±128 MiB 范围。
 fn encode_bl(source_address: u64, target_address: u64) -> Result<u32> {
     let displacement = i128::from(target_address) - i128::from(source_address);
     ensure!(
@@ -1117,6 +1341,7 @@ fn encode_bl(source_address: u64, target_address: u64) -> Result<u32> {
     Ok(0x9400_0000 | (u32::try_from(immediate & 0x03ff_ffff)?))
 }
 
+/// 把内核虚拟地址转换为文件偏移，并要求至少能容纳 4 字节指令。
 fn address_to_offset(
     address: u64,
     image_base: u64,
@@ -1131,6 +1356,8 @@ fn address_to_offset(
     Ok(offset)
 }
 
+/// 通过取大小上限和下一个符号地址的较小值确定函数的文件范围。
+/// 下一个符号边界可以防止扫描游走到无关（但可能相似）的代码里。
 fn function_scan_range(
     image: &[u8],
     symbols: &SymbolMap,
@@ -1160,6 +1387,10 @@ fn function_scan_range(
     Ok((start, end))
 }
 
+/// 在 `function` 内查找唯一一条目标属于 `accepted_targets` 的 `BL`。
+///
+/// 刻意要求唯一：如果编译器内联或复制了该调用，给错误的一处打补丁可能
+/// 破坏无关的内核行为，因此调用方会收到列出所有候选的错误。
 fn find_unique_direct_call(
     image: &[u8],
     symbols: &SymbolMap,
@@ -1206,6 +1437,9 @@ fn find_unique_direct_call(
     Ok(matches[0])
 }
 
+/// 把 `SUB (shifted register)` 解码为 `(Rd, Rn, Rm)`；其他编码返回 `None`。
+/// 仅用于识别 GCC/Clang 在内核镜像 `memblock_reserve()` 调用前紧邻生成的
+/// 两条减法。
 fn decode_sub_shifted_register(instruction: u32) -> Option<(u32, u32, u32)> {
     (instruction & 0xffe0_fc00 == 0xcb00_0000).then_some((
         instruction & 31,
@@ -1214,6 +1448,13 @@ fn decode_sub_shifted_register(instruction: u32) -> Option<(u32, u32, u32)> {
     ))
 }
 
+/// 定位为内核镜像保留内存的那次 `memblock_reserve()` 调用。
+///
+/// `arm64_memblock_init()` 中有多个 `memblock_reserve` 调用，仅凭目标地址
+/// 不够。内核镜像调用的特征是：它前面紧跟两条减法，分别从同一个内核符号
+/// 寄存器导出 `x1`（大小）和 `x0`（起始地址），例如
+/// `sub x1, xN, xM` 后接 `sub x0, xN, xP`。共享的源寄存器以及固定的目标
+/// 寄存器（`x1`、`x0`）可唯一确定它。
 fn find_kernel_image_memblock_reserve_call(
     image: &[u8],
     symbols: &SymbolMap,
@@ -1290,6 +1531,8 @@ fn find_kernel_image_memblock_reserve_call(
     Ok(semantic_matches[0])
 }
 
+/// 在 `width` 位元素内把 `value` 循环右移 `shift` 位，行为同 AArch64
+/// `ROR`。用于展开 `decode_orr_immediate` 的位掩码立即数。
 const fn rotate_right_width(value: u64, shift: u32, width: u32) -> u64 {
     let mask = if width == 64 {
         u64::MAX
@@ -1304,6 +1547,11 @@ const fn rotate_right_width(value: u64, shift: u32, width: u32) -> u64 {
     }
 }
 
+/// 解码 `ORR`/`MOV` 使用的 AArch64 "logical immediate" 位掩码，返回
+/// `(immediate, Rn, Rd)`。
+///
+/// 编码为 N:immr:imms；算法会在 32 或 64 位元素内复制一段循环旋转的全 1。
+/// 对保留编码返回 `None`，保证调用方的模式扫描可靠。
 fn decode_orr_immediate(instruction: u32) -> Option<(u64, u32, u32)> {
     if instruction >> 31 != 1 || instruction & 0x7f80_0000 != 0x3200_0000 {
         return None;
@@ -1334,6 +1582,13 @@ fn decode_orr_immediate(instruction: u32) -> Option<(u64, u32, u32)> {
     Some((immediate, (instruction >> 5) & 31, instruction & 31))
 }
 
+/// 从 `arm64_memblock_init` 函数体推断 PAGE_OFFSET。
+///
+/// `__pa_symbol()` 会被编译成从一个常量中减去符号地址，该常量是符号扩展
+/// 后的 PAGE_OFFSET，由 `ORR` 生成。我们接受同时满足以下条件的立即数：
+/// (a) 最高位为 1；(b) 其负的 2 的幂大小的置位落在 arm64 VA 范围
+/// （36..=52）；(c) 已覆盖内核基址中置位的所有 bit。必须恰好剩一个候选，
+/// 否则视为不支持的镜像，而不是猜测。
 fn infer_page_offset(
     image: &[u8],
     symbols: &SymbolMap,
@@ -1380,6 +1635,8 @@ fn infer_page_offset(
     Ok(*candidates.iter().next().expect("one PAGE_OFFSET"))
 }
 
+/// 收集可通过 `names` 中任一名称（含归一化别名）到达的所有地址，用作可
+/// 接受的分支目标集合。
 fn symbol_addresses(symbols: &SymbolMap, names: &[&str]) -> HashSet<u64> {
     names
         .iter()
@@ -1388,6 +1645,18 @@ fn symbol_addresses(symbols: &SymbolMap, names: &[&str]) -> HashSet<u64> {
         .collect()
 }
 
+/// 查找并校验所有将被改写的代码位置。
+///
+/// bootstrap 由三个钩子驱动：
+/// - `kernel_init` 在启动后期调用 `async_synchronize_full()`；该调用被
+///   重定向到 bootstrap 入口，从而在 `init` 之前运行。
+/// - `load_module` 为模块参数调用 `strndup_user()`；该调用被重定向到一个
+///   适配器，把 capsule 中保存的 args 复制成内核可用的字符串。
+/// - `arm64_memblock_init` 为内核镜像调用 `memblock_reserve()`；包装函数
+///   扩展这段保留区以覆盖追加的 capsule，避免内核复用该内存。
+///
+/// 这里同时恢复 PAGE_OFFSET，因为 bootstrap 需要它把 capsule 文件偏移
+/// 转换为映射后的虚拟地址。
 fn analyze_patch_sites(
     image: &[u8],
     symbols: &SymbolMap,
@@ -1450,6 +1719,8 @@ fn analyze_patch_sites(
     })
 }
 
+/// 允许位于 `_etext` 处或之后的符号：它们只是链接期标签而非真实函数，
+/// 不会使填充区失效。
 fn is_text_boundary_symbol(name: &str) -> bool {
     name == "_etext"
         || name.starts_with("__stop_")
@@ -1457,6 +1728,12 @@ fn is_text_boundary_symbol(name: &str) -> bool {
         || name.ends_with("_text_end")
 }
 
+/// 在 `.text` 尾部寻找 `required_size` 字节可证明未使用且全零的空间。
+///
+/// cave 必须位于 `[_stext, _etext)` 内，这样在 `free_initmem` 之后仍处于
+/// 可执行映射；并且不能与该范围内的任何真实符号重叠。会尝试两个候选
+/// 起点：优先页对齐（使 cave 隔离），退而求其次指令对齐。只有整个尾部
+/// 全为零时才接受候选，这证明那里没有活跃代码。
 fn find_text_tail_cave(
     image: &[u8],
     image_size: usize,
@@ -1482,6 +1759,7 @@ fn find_text_tail_cave(
     );
 
     let mut zero_start = end;
+    // 从 `.text` 末尾向前跨过零填充；cave 只能从这段连续零区内部开始。
     while zero_start > start && image[zero_start - 1] == 0 {
         zero_start -= 1;
     }
@@ -1539,6 +1817,8 @@ fn find_text_tail_cave(
     )
 }
 
+/// 确保所有带标签的字节区间互不重叠。用于在写入任何字节之前证明 code
+/// cave 不会与三处被改写的指令冲突。
 fn check_non_overlapping(ranges: &[(usize, usize, &str)]) -> Result<()> {
     for (index, &(start, end, label)) in ranges.iter().enumerate() {
         for &(other_start, other_end, other_label) in &ranges[index + 1..] {
@@ -1551,8 +1831,9 @@ fn check_non_overlapping(ranges: &[(usize, usize, &str)]) -> Result<()> {
     Ok(())
 }
 
-// Module ELF fixups and capsule construction.
+// 模块 ELF fixup 与 capsule 构造。
 
+/// ELF64 节的极简视图，只保留 fixup 过程需要的字段。
 #[derive(Clone, Copy)]
 struct ElfSection {
     section_type: u32,
@@ -1562,12 +1843,20 @@ struct ElfSection {
     entry_size: usize,
 }
 
+/// 从 `data` 读取 NUL 结尾字符串，并以有损方式解码 UTF-8。用于模块符号
+/// 名；只有畸形文件才可能出现非 UTF-8。
 fn read_c_string(data: &[u8], offset: usize) -> Option<String> {
     let tail = data.get(offset..)?;
     let end = tail.iter().position(|byte| *byte == 0)?;
     Some(String::from_utf8_lossy(&tail[..end]).into_owned())
 }
 
+/// 遍历模块的 ELF 符号表，把每个未定义符号解析到恢复出的内核 kallsyms。
+///
+/// 只有 `SHN_UNDEF` 符号需要 fixup；已定义和绝对符号本身就带有可用值。
+/// 每个 fixup 记录符号记录的文件偏移（而不是名称），因为 bootstrap 会
+/// 原地改写 `st_value`。无法解析的符号单独返回，让 bootstrap 留给内核
+/// 自带的解析器处理。
 fn collect_module_fixups(
     module: &[u8],
     symbols: &SymbolMap,
@@ -1578,6 +1867,7 @@ fn collect_module_fixups(
         module.len() >= 64 && module.starts_with(b"\x7fELF"),
         "module is not an ELF file"
     );
+    // EI_CLASS=ELFCLASS64 (2)，EI_DATA=ELFDATA2LSB (1)。
     ensure!(
         module[4] == 2 && module[5] == 1,
         "module must be little-endian ELF64"
@@ -1587,6 +1877,9 @@ fn collect_module_fixups(
         "module must be an ARM64 ET_REL object"
     );
 
+    // ELF64 头偏移：e_shoff=40、e_shentsize=58、e_shnum=60。节头布局：
+    // sh_type=+4、sh_offset=+24、sh_size=+32、sh_link=+40、sh_entsize=+56
+    // （除注明外均为 u64 字段）。
     let section_offset = usize::try_from(read_u64(module, 40)?)
         .context("ELF section offset does not fit this host")?;
     let section_entry_size = usize::from(read_u16(module, 58)?);
@@ -1657,6 +1950,8 @@ fn collect_module_fixups(
                 symbol_file_offset.saturating_add(24) <= module.len(),
                 "ELF symbol is outside the module"
             );
+            // ELF64 符号：st_name=+0 (u32)、st_shndx=+6 (u16)、
+            // st_value=+8。
             if read_u16(module, symbol_file_offset + 6)? != SHN_UNDEF {
                 continue;
             }
@@ -1699,6 +1994,10 @@ fn collect_module_fixups(
     Ok((fixups, unresolved))
 }
 
+/// 序列化供 capsule 使用的 fixup 表。
+///
+/// 每项 16 字节、小端：u32 符号文件偏移、u32 保留（必须为零）、u64 内核
+/// 文件偏移。保留字让 u64 自然对齐，也为将来加入标志位留出空间。
 fn pack_fixups(fixups: &[Fixup]) -> Result<Vec<u8>> {
     let mut output = Vec::with_capacity(fixups.len() * 16);
     for fixup in fixups {
@@ -1709,6 +2008,10 @@ fn pack_fixups(fixups: &[Fixup]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
+/// 计算模块字节的 SHA-256，返回原始 32 字节数组。
+///
+/// `sha256` crate 返回小写十六进制；这里解码回字节，因为 capsule 线上格式
+/// 存的是原始摘要。
 fn module_sha256(module: &[u8]) -> Result<[u8; 32]> {
     let digest = sha256::digest(module);
     let mut output = [0u8; 32];
@@ -1717,6 +2020,28 @@ fn module_sha256(module: &[u8]) -> Result<[u8; 32]> {
     Ok(output)
 }
 
+/// 构造追加在内核镜像之后的 capsule。
+///
+/// 布局（偏移相对 capsule 起点，均为小端）：
+///
+/// ```text
+/// 0x00  magic "KSULKM1\0"（8 字节）
+/// 0x08  version (u32)
+/// 0x0c  header size (u32, 112)
+/// 0x10  capsule size (u64，4096 对齐)
+/// 0x18  module offset (u64)
+/// 0x20  module size (u64)
+/// 0x28  fixup offset (u64)
+/// 0x30  fixup count (u64)
+/// 0x38  flags (u64)
+/// 0x40  module SHA-256（32 字节）
+/// 0x60  args offset (u64)
+/// 0x68  args size (u64)
+/// 0x70  module 字节，随后是 16 字节对齐的 fixup 表，最后是 args
+/// ```
+///
+/// capsule 从原始 `image_size` 之后 16 字节边界开始，最终镜像按
+/// `CAPSULE_ALIGNMENT` 填充，以便按页映射。
 fn build_capsule(
     image_size: usize,
     module: &[u8],
@@ -1743,7 +2068,7 @@ fn build_capsule(
             .context("capsule fixup offset overflow")?,
         16,
     );
-    // NUL-terminated, passed to load_module() as uargs
+    // 以 NUL 结尾，作为 uargs 传给 load_module()
     let args_size = params.len() + 1;
     let content_end = args_relative_offset
         .checked_add(args_size)
@@ -1777,7 +2102,7 @@ fn build_capsule(
     data[module_relative_offset..module_relative_offset + module.len()].copy_from_slice(module);
     data[fixup_relative_offset..fixup_relative_offset + fixup_bytes.len()]
         .copy_from_slice(fixup_bytes);
-    // The trailing NUL comes from the zero-filled capsule
+    // 结尾的 NUL 来自全零填充的 capsule
     data[args_relative_offset..args_relative_offset + params.len()]
         .copy_from_slice(params.as_bytes());
 
@@ -1792,8 +2117,12 @@ fn build_capsule(
     })
 }
 
-// Build-time embedded bootstrap and minimal runtime ET_REL linker.
+// 构建期嵌入的 bootstrap 与运行期极简 ET_REL 链接器。
 
+/// bootstrap 对象中一个节的解析结果。
+///
+/// `output_offset` 是该节在最终重定位镜像中的偏移；只有可加载节
+/// （SHF_ALLOC）才会被赋值。
 #[derive(Clone, Debug)]
 struct BootstrapSection {
     name: String,
@@ -1808,6 +2137,7 @@ struct BootstrapSection {
     output_offset: Option<usize>,
 }
 
+/// bootstrap 符号表中的一项。
 #[derive(Debug)]
 struct BootstrapSymbol {
     name: String,
@@ -1815,6 +2145,11 @@ struct BootstrapSymbol {
     section_index: u16,
 }
 
+/// 解析后的嵌入 bootstrap；`data` 仍指向编译期嵌入的只读字节。
+///
+/// bootstrap 是随 ksud 一起构建的极小 AArch64 ET_REL 对象。内核里没有用户态
+/// 动态链接器，所以补丁阶段必须在这里完成重定位，并把结果直接写进内核
+/// `.text` 的零填充区。
 #[derive(Debug)]
 struct BootstrapObject<'a> {
     data: &'a [u8],
@@ -1824,6 +2159,10 @@ struct BootstrapObject<'a> {
     image_size: usize,
 }
 
+/// 完成重定位后的 bootstrap 代码及其三个关键入口地址。
+///
+/// `entry_address` 接管 `kernel_init` 中的 async 调用；另外两个地址分别用于
+/// 替换 `memblock_reserve` 调用和 `strndup_user` 调用。
 #[derive(Debug)]
 struct LinkedBootstrap {
     data: Vec<u8>,
@@ -1832,6 +2171,7 @@ struct LinkedBootstrap {
     strndup_adapter_address: u64,
 }
 
+/// 带溢出检查的 2 的幂对齐；节对齐来自 ELF 文件，必须先验证。
 fn checked_align_up(value: usize, alignment: usize) -> Result<usize> {
     ensure!(
         alignment.is_power_of_two(),
@@ -1843,6 +2183,8 @@ fn checked_align_up(value: usize, alignment: usize) -> Result<usize> {
         .context("ELF section layout overflow")
 }
 
+/// 读取 ELF 字符串表中的一个 UTF-8 字符串。bootstrap 由本项目自己构建，
+/// 因此非 UTF-8 直接视为错误，而不是有损解码。
 fn read_elf_string(data: &[u8], offset: usize) -> Result<&str> {
     let tail = data
         .get(offset..)
@@ -1855,6 +2197,12 @@ fn read_elf_string(data: &[u8], offset: usize) -> Result<&str> {
 }
 
 impl<'a> BootstrapObject<'a> {
+    /// 解析并严格校验嵌入的 bootstrap。
+    ///
+    /// 只接受由本项目构建脚本产出的形状：ELF64、小端、AArch64 ET_REL、恰好
+    /// 一个 `.text.ksu_bootstrap`、至多一个 `.rodata.ksu_bootstrap`，且除这两
+    /// 个节外不允许其他可加载节。其余情况一律拒绝，避免把任意对象代码写进
+    /// 内核。
     fn parse(data: &'a [u8]) -> Result<Self> {
         ensure!(
             data.len() >= 64 && data.starts_with(b"\x7fELF"),
@@ -1962,7 +2310,7 @@ impl<'a> BootstrapObject<'a> {
         };
         let text_index = find_section(".text.ksu_bootstrap")?
             .context("bootstrap must contain exactly one .text.ksu_bootstrap section")?;
-        // Optional, the bootstrap currently keeps all its constants in literal pools
+        // 可选；bootstrap 目前把所有常量都保存在字面量池中
         let rodata_index = find_section(".rodata.ksu_bootstrap")?;
         let text = &sections[text_index];
         ensure!(
@@ -2109,6 +2457,7 @@ impl<'a> BootstrapObject<'a> {
         self.image_size
     }
 
+    /// 计算可加载节在最终代码区中的虚拟地址。
     fn section_address(&self, section_index: usize, code_address: u64) -> Result<u64> {
         let section = self
             .sections
@@ -2125,6 +2474,11 @@ impl<'a> BootstrapObject<'a> {
             .context("bootstrap section address overflow")
     }
 
+    /// 求一个符号在最终地址空间中的值。
+    ///
+    /// - `SHN_UNDEF`：必须能在 `definitions` 中找到内核侧地址。
+    /// - `SHN_ABS`：直接使用符号自带的绝对值。
+    /// - 其他节索引：节基址加上符号在节内的偏移。
     fn symbol_value(
         &self,
         symbol_index: usize,
@@ -2150,6 +2504,8 @@ impl<'a> BootstrapObject<'a> {
         }
     }
 
+    /// 按名称查找唯一定义的符号并求值；重复或缺失都视为错误，因为三个入口
+    /// 地址不允许有歧义。
     fn named_symbol_value(
         &self,
         name: &str,
@@ -2175,6 +2531,11 @@ impl<'a> BootstrapObject<'a> {
         self.symbol_value(matches[0], code_address, definitions)
     }
 
+    /// 把解析后的 bootstrap 链接到 `code_address`。
+    ///
+    /// 步骤：按 `output_offset` 布局可加载节并校验运行期对齐；复制节内容；
+    /// 逐条应用 RELA 重定位（`definitions` 提供内核侧符号地址）；最后解析
+    /// 三个导出入口。所有重定位都在补丁阶段完成，运行期不再有链接开销。
     fn link(
         &self,
         code_address: u64,
@@ -2289,6 +2650,11 @@ impl<'a> BootstrapObject<'a> {
     }
 }
 
+/// 应用一条 AArch64 RELA 重定位。
+///
+/// 只支持 bootstrap 实际用到的几种类型：绝对地址、26 位分支和 ADRP/ADD
+/// 页地址对。每种类型都会先校验写入位置的对齐以及目标指令的操作码，防止
+/// 在错误的指令上写入，导致内核在启动时执行非法代码。
 fn apply_bootstrap_relocation(
     output: &mut [u8],
     output_offset: usize,
@@ -2297,6 +2663,7 @@ fn apply_bootstrap_relocation(
     symbol_value: u64,
     addend: i64,
 ) -> Result<()> {
+    // 用 i128 求和，避免 64 位地址加上负 addend 时溢出。
     let value = i128::from(symbol_value) + i128::from(addend);
     match relocation_type {
         R_AARCH64_ABS64 => {
@@ -2322,6 +2689,8 @@ fn apply_bootstrap_relocation(
             )
         }
         R_AARCH64_CALL26 | R_AARCH64_JUMP26 => {
+            // bit 31..26 是操作码（BL=0b100101，B=0b000101），低 26 位是
+            // 以 4 字节为单位的 PC 相对位移。
             let delta = value - i128::from(place_address);
             ensure!(delta % 4 == 0, "branch target is not instruction-aligned");
             let immediate = delta / 4;
@@ -2356,6 +2725,7 @@ fn apply_bootstrap_relocation(
                 "ADRP relocation does not target an ADRP instruction"
             );
             let immediate = (page_delta as i64 as u64) & 0x1f_ffff;
+            // ADRP 把 21 位页位移拆成 immlo（bit 30:29）和 immhi（bit 23:5）。
             let immlo = u32::try_from((immediate & 0x3) << 29)?;
             let immhi = u32::try_from(((immediate >> 2) & 0x7_ffff) << 5)?;
             write_u32(
@@ -2372,6 +2742,7 @@ fn apply_bootstrap_relocation(
                 "ADD relocation does not target an unshifted ADD-immediate instruction"
             );
             let immediate = u32::try_from((target & 0xfff) << 10)?;
+            // ADD-immediate 的 12 位立即数位于 bit 21:10。
             write_u32(
                 output,
                 output_offset,
@@ -2382,8 +2753,23 @@ fn apply_bootstrap_relocation(
     }
 }
 
-// Raw ARM64 Image injection.
+// 原始 ARM64 Image 注入。
 
+/// 把模块注入原始 ARM64 Image，返回新的镜像字节和诊断报告。
+///
+/// 前置条件：`original_image` 是未压缩的 ARM64 Image，且 `len() <= image_size`
+/// （其后的追加元数据不受支持）。流程分三阶段：
+///
+/// 1. 分析：恢复 kallsyms/BTF、解析必需符号、识别 GKI ABI、定位三处补丁点，
+///    并把模块的未定义符号解析成 fixup。
+/// 2. 构造：在 `image_size` 之后生成 capsule，并在 `.text` 尾部找到 code cave，
+///    把 bootstrap 重定位到该地址。
+/// 3. 写入：复制 bootstrap、改写三处 `BL`、扩展镜像到页对齐的新大小并更新
+///    头部的 `image_size`。
+///
+/// capsule 位于原始 `image_size` 之后，bootstrap 只写入 `.text` 内已证明全零的
+/// 填充区；写入前还会证明 code cave 与三处补丁点互不重叠，因此不会破坏原有
+/// 内核内容。
 fn inject_image(
     original_image: &[u8],
     module: &[u8],
@@ -2391,6 +2777,7 @@ fn inject_image(
 ) -> Result<(Vec<u8>, ImageInjectionReport)> {
     let mut image = original_image.to_vec();
     let image_size = parse_arm64_image_size(&image)?;
+    // 超出 image_size 的字节通常是追加的 DTB/元数据，重新打包会丢失，直接拒绝。
     ensure!(
         image.len() <= image_size,
         "input has bytes beyond ARM64 image_size; appended DTB/metadata is unsupported"
@@ -2425,6 +2812,8 @@ fn inject_image(
         .context("capsule did not extend the Image")?;
 
     let mut definitions = BTreeMap::<&str, u64>::new();
+    // bootstrap 通过符号名读取这些编译期常量；键名必须与 bootstrap 源码中的
+    // extern 名称严格一致。capsule 内的偏移都是 capsule 相对偏移。
     definitions.insert(
         "ksu_ext_memblock_reserve",
         sites.memblock_reserve_call.target,
@@ -2482,6 +2871,8 @@ fn inject_image(
     let bootstrap = bootstrap_object
         .link(code_address, &definitions)
         .context("cannot relocate the embedded LKM bootstrap")?;
+    // 入口必须正好落在 cave 起点：bootstrap 的首条指令就是接管 async 调用后
+    // 的执行流。
     let bootstrap_address = bootstrap.entry_address;
     let adapter_address = bootstrap.strndup_adapter_address;
     let reserve_wrapper_address = bootstrap.reserve_wrapper_address;
@@ -2494,6 +2885,7 @@ fn inject_image(
         "code cave needs 0x{:x} bytes, cave has 0x{code_cave_size:x}",
         bootstrap.data.len()
     );
+    // 写入前先证明 cave 与三处补丁指令互不重叠，避免自覆盖。
     check_non_overlapping(&[
         (code_offset, code_offset + code_cave_size, "code cave"),
         (
@@ -2514,6 +2906,8 @@ fn inject_image(
     ])?;
 
     get_slice_mut(&mut image, code_offset, bootstrap.data.len())?.copy_from_slice(&bootstrap.data);
+    // 三处 BL 分别重定向到 bootstrap 入口、strndup 适配器和
+    // memblock_reserve 包装函数。
     write_u32(
         &mut image,
         sites.async_call.file_offset,
@@ -2529,6 +2923,8 @@ fn inject_image(
         sites.memblock_reserve_call.file_offset,
         encode_bl(sites.memblock_reserve_call.address, reserve_wrapper_address)?,
     )?;
+    // 先补齐到原始 image_size，再补齐到 capsule 起始的 16 字节边界，最后追加
+    // capsule。中间的零填充保证 capsule 对齐且不会覆盖原有内容。
     image.resize(image_size, 0);
     image.resize(capsule.file_offset, 0);
     image.extend_from_slice(&capsule.data);
@@ -2536,6 +2932,7 @@ fn inject_image(
         image.len() == capsule.image_size,
         "internal error: capsule length does not match new image_size"
     );
+    // 更新头部的 image_size；这是内核计算可加载范围的唯一依据。
     write_u64(
         &mut image,
         ARM64_IMAGE_SIZE_OFFSET,
@@ -2568,8 +2965,12 @@ fn inject_image(
     ))
 }
 
-// boot-patch-v2 orchestration.
+// boot-patch-v2 顶层编排。
 
+/// 根据 KMI（例如 "android12-5.10"）拼出内置模块的资源名。
+///
+/// Android 构建中资源直接位于 assets 根目录；主机侧（测试/开发）则放在
+/// `aarch64/` 子目录，与发布产物的布局一致。
 fn embedded_module_name(kmi: &str) -> String {
     #[cfg(target_os = "android")]
     {
@@ -2581,6 +2982,15 @@ fn embedded_module_name(kmi: &str) -> String {
     }
 }
 
+/// 执行 `boot-patch-v2`：解析 boot 镜像、注入模块、重新打包并原子写出。
+///
+/// 安全约束：输出路径不能与任何输入（boot 镜像或模块）相同；若输出已存在，
+/// 必须显式传入 `--force`。写出时先在同目录创建临时文件，成功后再
+/// `persist`，避免中途失败留下半个 boot 镜像。
+///
+/// 只有内核块会被替换；boot header、ramdisk、vendor_boot 分片和 AVB footer
+/// 结构由 `android_bootimg` 保留并重新打包。AVB 签名不会重新生成，改动内核后
+/// 原签名即失效，需要调用方另行签名或关闭校验。
 pub fn patch_boot(args: &BootPatchV2Args) -> Result<()> {
     ensure!(
         args.boot.is_file(),
@@ -2595,6 +3005,7 @@ pub fn patch_boot(args: &BootPatchV2Args) -> Result<()> {
         );
     }
     if args.output.exists() {
+        // 先规范化路径，防止通过相对路径或符号链接绕过“不得覆盖输入”的检查。
         let output = fs::canonicalize(&args.output)
             .with_context(|| format!("cannot resolve output {}", args.output.display()))?;
         let mut inputs = vec![("boot image", &args.boot)];
@@ -2616,6 +3027,7 @@ pub fn patch_boot(args: &BootPatchV2Args) -> Result<()> {
     println!("- Reading boot image");
     let boot_data = fs::read(&args.boot)
         .with_context(|| format!("cannot read boot image {}", args.boot.display()))?;
+    // 只解析容器并取出内核块；其余内容由 crate 原样保留。
     let boot_image = BootImage::parse(&boot_data).context("cannot parse boot image")?;
     let kernel = boot_image
         .get_blocks()
@@ -2623,6 +3035,7 @@ pub fn patch_boot(args: &BootPatchV2Args) -> Result<()> {
         .context("boot image does not contain a kernel")?;
     println!("- Decompressing kernel");
     let mut raw_kernel = Vec::new();
+    // 解压后必须是原始 ARM64 Image；压缩格式的识别由 crate 完成。
     kernel
         .dump(&mut raw_kernel, false)
         .context("cannot decompress boot kernel")?;
@@ -2632,6 +3045,7 @@ pub fn patch_boot(args: &BootPatchV2Args) -> Result<()> {
         fs::read(module)
             .with_context(|| format!("cannot read kernel module {}", module.display()))?
     } else {
+        // 未显式指定模块时，从内核 banner 推断 KMI，再取随包内置的对应构建。
         let kmi = boot_patch::parse_kmi(&raw_kernel)
             .context("cannot detect KMI from the boot image kernel")?;
         let name = embedded_module_name(&kmi);
@@ -2645,6 +3059,7 @@ pub fn patch_boot(args: &BootPatchV2Args) -> Result<()> {
     let mut params = Vec::new();
     args.config.validate()?;
     args.config.apply(&mut params);
+    // 参数最终写入 capsule 的 args 区，由 bootstrap 作为 uargs 交给 load_module。
     let params = params.join(" ");
     if !params.is_empty() {
         println!("- Module params: {params}");
@@ -2655,6 +3070,7 @@ pub fn patch_boot(args: &BootPatchV2Args) -> Result<()> {
 
     println!("- Repacking boot image");
     let mut patcher = BootImagePatchOption::new(&boot_image);
+    // patched_kernel 已是未压缩的原始 ARM64 Image，因此 compressed=false。
     patcher.replace_kernel(Box::new(Cursor::new(patched_kernel)), false);
     let mut repacked = Cursor::new(Vec::with_capacity(boot_data.len()));
     patcher
@@ -2669,6 +3085,7 @@ pub fn patch_boot(args: &BootPatchV2Args) -> Result<()> {
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(output_parent)
         .with_context(|| format!("cannot create output directory {}", output_parent.display()))?;
+    // 先写同目录临时文件，成功后再 persist，避免失败时留下残缺的 boot 镜像。
     let mut temporary = tempfile::NamedTempFile::new_in(output_parent)
         .context("cannot create temporary boot image")?;
     temporary
@@ -2681,6 +3098,7 @@ pub fn patch_boot(args: &BootPatchV2Args) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
 
+        // 沿用源 boot 镜像的权限位，保证产物可直接被 fastboot 等工具读取。
         let mode = fs::metadata(&args.boot)
             .with_context(|| format!("cannot stat boot image {}", args.boot.display()))?
             .permissions()
@@ -2750,12 +3168,14 @@ pub fn patch_boot(args: &BootPatchV2Args) -> Result<()> {
     Ok(())
 }
 
-// Focused format and analysis tests.
+// 针对格式与分析的单元测试。
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 为 bootstrap 的未定义符号构造测试用地址：`ksu_ext_*` 与
+    /// `ksu_image_base` 落在镜像基址之后，其余符号用小的递增值。
     fn bootstrap_test_definitions<'a>(
         object: &'a BootstrapObject<'a>,
         image_base: u64,
@@ -2788,6 +3208,7 @@ mod tests {
     fn build_test_btf(types: &[u8], strings: &[u8]) -> Vec<u8> {
         assert!(!strings.is_empty());
         let mut output = Vec::new();
+        // BTF 头 magic 0xeb9f（小端），版本 1。
         output.extend_from_slice(&0xeb9fu16.to_le_bytes());
         output.extend_from_slice(&[1, 0]);
         for value in [
@@ -2823,6 +3244,10 @@ mod tests {
         build_kallsyms_fixture_with_btf_and_token(layout, btf_range, None)
     }
 
+    /// 手工构造一个包含 ARM64 头、kallsyms、可选 BTF 边界的合成镜像。
+    ///
+    /// 符号数特意取 2049（大于 8*256），以覆盖多组 markers；`layout` 决定按
+    /// 6.4 之前还是 6.4+ 的顺序摆放各表。返回镜像和 `_text` 基址。
     fn build_kallsyms_fixture_with_btf_and_token(
         layout: &str,
         btf_range: Option<(usize, usize)>,
