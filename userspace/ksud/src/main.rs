@@ -75,6 +75,7 @@ mod utils;
 #[cfg(target_os = "android")]
 #[allow(nonstandard_style, unused, unsafe_op_in_unsafe_fn)]
 mod ksu_uapi;
+pub mod module_integrity_check;
 
 fn main() -> anyhow::Result<()> {
     // Android 构建使用 `cli.rs` 中的完整命令行；主机构建只需要离线的

@@ -8,16 +8,17 @@ use anyhow::{Context, Ok, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
-use android_logger::Config;
-use log::{LevelFilter, error, info};
-
 use crate::boot_patch::{BootPatchArgs, BootRestoreArgs};
 use crate::lkm_image::BootPatchV2Args;
 use crate::module::regenerate_preinit;
+use crate::module_integrity_check::{disable_integrity, enable_integrity};
 use crate::{
     apk_sign, assets, debug, defs, init_event, ksu_uapi, ksucalls, module, module_config, sulog,
     utils,
 };
+use android_logger::Config;
+use log::{LevelFilter, error, info};
+use sha1::digest::common;
 
 /// KernelSU 用户空间命令行工具
 #[derive(Parser, Debug)]
@@ -341,8 +342,16 @@ enum Module {
         #[command(subcommand)]
         command: ModuleConfigCmd,
     },
+    /// 管理是否验证模块签名
+    Integrity {
+        #[command(subcommands = )]
+        command: IntegrityStatus,
+    },
 }
-
+enum IntegrityStatus {
+    Enable,
+    Disable,
+}
 #[derive(clap::Subcommand, Debug)]
 enum PreinitCmd {
     /// 显示下次开机时各模块的 preinit 状态
@@ -568,6 +577,10 @@ pub fn run() -> Result<()> {
                         Ok(())
                     }
                     PreinitCmd::Reset => crate::preinit::reset_bootcount(),
+                },
+                Module::Integrity => match command {
+                    IntegrityStatus::Enable => enable_integrity(),
+                    IntegrityStatus::Disable => disable_integrity(),
                 },
                 Module::Config { internal, command } => {
                     // 模块脚本的环境变量中带有 `KSU_MODULE`；

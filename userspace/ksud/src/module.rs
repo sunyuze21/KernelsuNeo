@@ -38,6 +38,7 @@ use zip_extensions::inflate::zip_extract::zip_extract_file_to_memory;
 
 use crate::defs::{MODULE_DIR, MODULE_UPDATE_DIR, UPDATE_FILE_NAME};
 use crate::module::ModuleType::{Active, All};
+use crate::module_integrity_check::module_integrity_check;
 use std::os::unix::{prelude::PermissionsExt, process::CommandExt};
 
 // 可刷写 ZIP 的安装脚本被内嵌进 ksud，因此无需 Manager 也能安装模块
@@ -901,6 +902,8 @@ fn install_module_to_system(zip: &str) -> Result<String> {
 /// 最后刷新 preinit。
 pub fn install_module(zip: &str) -> Result<()> {
     ksucalls::ensure_uapi_version_matched()?;
+
+    let modules_integrity = module_integrity_check(zip);
 
     let module_id = install_module_to_system(zip).inspect_err(|e| println!("- Error: {e}"))?;
     if let Err(e) = regenerate_preinit() {
