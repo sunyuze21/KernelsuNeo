@@ -194,13 +194,17 @@ pub fn get_feature(id: &str) -> Result<()> {
     let state = crate::ksucalls::get_feature(feature_id as u32)
         .with_context(|| format!("Failed to get feature {id}"))?;
 
+    println!("Feature: {}", feature_id.name());
+    println!("ID: {}", feature_id as u32);
+    println!("Description: {}", feature_id.description());
+    println!("Supported: {}", if state.supported { "yes" } else { "no" });
+
     if !state.supported {
-        println!("Feature '{id}' is not supported by kernel");
+        println!("Status: unsupported");
         return Ok(());
     }
 
-    println!("Feature: {} ({})", feature_id.name(), feature_id as u32);
-    println!("Description: {}", feature_id.description());
+    // Manager 通过 `Value:` 行读取当前值，格式保持不变。
     println!("Value: {}", state.value);
     println!(
         "Status: {}",
@@ -210,9 +214,7 @@ pub fn get_feature(id: &str) -> Result<()> {
             "disabled"
         }
     );
-    if state.forced {
-        println!("Forced: by boot config");
-    }
+    println!("Forced: {}", if state.forced { "yes" } else { "no" });
 
     Ok(())
 }
@@ -224,8 +226,10 @@ pub fn get_feature_config(id: &str) -> Result<()> {
     let features = load_binary_config()?;
     let id_u32 = feature_id as u32;
 
-    println!("Feature: {} ({})", feature_id.name(), id_u32);
+    println!("Feature: {}", feature_id.name());
+    println!("ID: {id_u32}");
     println!("Description: {}", feature_id.description());
+    println!("Source: config");
 
     if let Some(value) = features.get(&id_u32) {
         println!("Value: {value}");
@@ -234,7 +238,7 @@ pub fn get_feature_config(id: &str) -> Result<()> {
             if *value != 0 { "enabled" } else { "disabled" }
         );
     } else {
-        println!("Not set in config");
+        println!("Status: not-set");
     }
 
     Ok(())

@@ -38,7 +38,7 @@ use zip_extensions::inflate::zip_extract::zip_extract_file_to_memory;
 
 use crate::defs::{MODULE_DIR, MODULE_UPDATE_DIR, UPDATE_FILE_NAME};
 use crate::module::ModuleType::{Active, All};
-use crate::module_integrity_check::module_integrity_check;
+use crate::module_integrity_check::{INTEGRITY_CHECK_PATH, module_integrity_check};
 use std::os::unix::{prelude::PermissionsExt, process::CommandExt};
 
 // 可刷写 ZIP 的安装脚本被内嵌进 ksud，因此无需 Manager 也能安装模块
@@ -744,9 +744,6 @@ fn install_module_to_system(zip: &str) -> Result<String> {
     // 因此要求 boot_completed。
     ensure_boot_completed()?;
 
-    // 打印 banner
-    println!(include_str!("banner"));
-
     assets::ensure_binaries(false).with_context(|| "Failed to extract assets")?;
 
     // 先检查工作目录是否可用
@@ -782,19 +779,16 @@ fn install_module_to_system(zip: &str) -> Result<String> {
 
     // 检查安装普通模块是否安全
     if !is_metamodule && let Err(is_disabled) = metamodule::check_install_safety() {
-        println!("\n❌ Installation Blocked");
-        println!("┌────────────────────────────────");
-        println!("│ A metamodule with custom installer is active");
-        println!("│");
+        println!("! Installation blocked");
+        println!("! A metamodule with a custom installer is active");
         if is_disabled {
-            println!("│ Current state: Disabled");
-            println!("│ Action required: Re-enable or uninstall it, then reboot");
+            println!("! Current state: disabled");
+            println!("! Re-enable or uninstall it, then reboot");
         } else {
-            println!("│ Current state: Pending changes");
-            println!("│ Action required: Reboot to apply changes first");
+            println!("! Current state: pending changes");
+            println!("! Reboot to apply changes first");
         }
-        println!("└─────────────────────────────────\n");
-        bail!("Metamodule installation blocked");
+        bail!("Cannot install a regular module while a metamodule is active");
     }
 
     // 所有模块（包括 metamodule）都安装到 MODULE_UPDATE_DIR
@@ -813,18 +807,10 @@ fn install_module_to_system(zip: &str) -> Result<String> {
                 .unwrap_or_else(|| "unknown".to_string());
 
             if existing_id != module_id {
-                println!("\n❌ Installation Failed");
-                println!("┌────────────────────────────────");
-                println!("│ A metamodule is already installed");
-                println!("│   Current metamodule: {existing_id}");
-                println!("│");
-                println!("│ Only one metamodule can be active at a time.");
-                println!("│");
-                println!("│ To install this metamodule:");
-                println!("│   1. Uninstall the current metamodule");
-                println!("│   2. Reboot your device");
-                println!("│   3. Install the new metamodule");
-                println!("└─────────────────────────────────\n");
+                println!("! Installation failed");
+                println!("! A metamodule is already installed: {existing_id}");
+                println!("! Only one metamodule can be active at a time");
+                println!("! Uninstall the current metamodule and reboot before installing another");
                 bail!("Cannot install multiple metamodules");
             }
         }
@@ -871,7 +857,7 @@ fn install_module_to_system(zip: &str) -> Result<String> {
     if let Some(request) = hot_install::take_request(&updated_dir)
         && hot_install::apply(module_id, is_metamodule, &request)
     {
-        println!("- Module installed successfully, no reboot required!");
+        println!("- Module installed successfully (no reboot required)");
         info!("Module {module_id} installed successfully!");
         return Ok(module_id.to_owned());
     }
@@ -892,7 +878,7 @@ fn install_module_to_system(zip: &str) -> Result<String> {
         metamodule::ensure_symlink(&module_dir)?;
     }
 
-    println!("- Module installed successfully!");
+    println!("- Module installed successfully");
     info!("Module {module_id} installed successfully!");
 
     Ok(module_id.to_owned())
@@ -903,9 +889,16 @@ fn install_module_to_system(zip: &str) -> Result<String> {
 pub fn install_module(zip: &str) -> Result<()> {
     ksucalls::ensure_uapi_version_matched()?;
 
-    let modules_integrity = module_integrity_check(zip);
+    println!(include_str!("banner"));
 
-    let module_id = install_module_to_system(zip).inspect_err(|e| println!("- Error: {e}"))?;
+    // 模块签名校验需要显式开启；未开启时保持原来的安装流程。
+    if Path::new(INTEGRITY_CHECK_PATH).exists() {
+        println!("- Verifying module signature");
+        module_integrity_check(zip)
+            .map_err(|e| anyhow!("Module signature verification failed: {e}"))?;
+        println!("- Module signature verified");
+    }
+    let module_id = install_module_to_system(zip)?;
     if let Err(e) = regenerate_preinit() {
         warn!("regenerate preinit failed: {e:#}");
     }
@@ -1218,7 +1211,9 @@ fn list_module(path: &str) -> Vec<HashMap<String, String>> {
 
 pub fn list_modules() -> Result<()> {
     let modules = list_module(defs::MODULE_DIR);
-    println!("{}", serde_json::to_string_pretty(&modules)?);
+    // Manager 会把多行输出重新拼接成 JSON；直接输出单行可避免逐行处理带来的
+    // 兼容问题，也减少传输量。
+    println!("{}", serde_json::to_string(&modules)?);
     Ok(())
 }
 

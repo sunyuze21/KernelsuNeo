@@ -18,7 +18,6 @@ use crate::{
 };
 use android_logger::Config;
 use log::{LevelFilter, error, info};
-use sha1::digest::common;
 
 /// KernelSU 用户空间命令行工具
 #[derive(Parser, Debug)]
@@ -344,12 +343,16 @@ enum Module {
     },
     /// 管理是否验证模块签名
     Integrity {
-        #[command(subcommands = )]
+        #[command(subcommand)]
         command: IntegrityStatus,
     },
 }
+
+#[derive(clap::Subcommand, Debug)]
 enum IntegrityStatus {
+    /// 启用模块签名校验
     Enable,
+    /// 关闭模块签名校验
     Disable,
 }
 #[derive(clap::Subcommand, Debug)]
@@ -578,9 +581,17 @@ pub fn run() -> Result<()> {
                     }
                     PreinitCmd::Reset => crate::preinit::reset_bootcount(),
                 },
-                Module::Integrity => match command {
-                    IntegrityStatus::Enable => enable_integrity(),
-                    IntegrityStatus::Disable => disable_integrity(),
+                Module::Integrity { command } => match command {
+                    IntegrityStatus::Enable => {
+                        enable_integrity()?;
+                        println!("Module signature verification enabled");
+                        Ok(())
+                    }
+                    IntegrityStatus::Disable => {
+                        disable_integrity()?;
+                        println!("Module signature verification disabled");
+                        Ok(())
+                    }
                 },
                 Module::Config { internal, command } => {
                     // 模块脚本的环境变量中带有 `KSU_MODULE`；
@@ -871,10 +882,11 @@ pub fn run() -> Result<()> {
         },
     };
 
-    // 除了向上返回错误，这里也记录日志：main() 只会打印 anyhow 错误链，
-    // 而模块脚本失败后通常只能依赖 logcat 留下线索。
+    // 错误同时写入 logcat；main() 会把 anyhow 错误链打印到 stderr，
+    // 因此这里不再重复 "Error:" 前缀。模块脚本失败后通常只能依赖 logcat
+    // 留下线索。
     if let Err(e) = &result {
-        log::error!("Error: {e:?}");
+        log::error!("{e:?}");
     }
     result
 }

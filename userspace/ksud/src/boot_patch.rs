@@ -205,7 +205,7 @@ mod android {
     pub(super) fn do_backup(cpio: &mut Cpio, image: &Path) -> Result<()> {
         let sha1 = calculate_sha1(image)?;
         let (mut target_file, target) = find_backup_location(&sha1)?;
-        println!("- Backup stock boot image");
+        println!("- Backing up stock boot image");
         let mut source = OpenOptions::new()
             .create(false)
             .truncate(false)
@@ -219,7 +219,7 @@ mod android {
 
         let backup_file = CpioEntry::regular(0o755, Box::new(sha1));
         cpio.add(BACKUP_FILENAME, backup_file)?;
-        println!("- Stock image has been backup to");
+        println!("- Stock image backed up to");
         println!("- {target}");
         Ok(())
     }
@@ -227,7 +227,7 @@ mod android {
     /// 删除旧的原厂镜像备份，只保留 `sha1` 对应的文件。实际只需要一份原厂
     /// 镜像，而这些文件很大，因此还原成功后清理过期备份。
     pub(super) fn clean_backup(sha1: &str) -> Result<()> {
-        println!("- Clean up backup");
+        println!("- Cleaning up backup");
         let backup_name = format!("{KSU_BACKUP_FILE_PREFIX}{sha1}");
         let dir = std::fs::read_dir(KSU_BACKUP_DIR)?;
         for entry in dir.flatten() {
@@ -241,7 +241,7 @@ mod android {
                     && name.starts_with(KSU_BACKUP_FILE_PREFIX)
                     && std::fs::remove_file(path).is_ok()
                 {
-                    println!("- removed {name}");
+                    println!("- Removed {name}");
                 }
             }
         }
@@ -447,7 +447,8 @@ pub fn parse_kmi(buffer: &[u8]) -> Result<String> {
             }
         })
         .ok_or_else(|| {
-            println!("- Failed to get KMI version");
+            // 走 stderr：boot-info 的 stdout 会被 Manager 当作返回值解析。
+            eprintln!("- Failed to detect KMI version");
             anyhow!("Try to choose LKM manually")
         })
 }
@@ -821,7 +822,7 @@ pub fn patch(args: BootPatchArgs) -> Result<()> {
                     // 当前运行的内核仍属于旧槽位，而 OTA 载荷属于另一个槽位，
                     // 因此改为探测另一个槽位的 boot 镜像。
                     let slot_suffix = get_slot_suffix(true);
-                    println!("- Trying to auto detect KMI version from boot");
+                    println!("- Detecting KMI from boot image");
                     return parse_kmi_from_boot(Path::new(&format!(
                         "/dev/block/by-name/boot{slot_suffix}"
                     )));
@@ -839,16 +840,10 @@ pub fn patch(args: BootPatchArgs) -> Result<()> {
                     // 裸 ramdisk 不包含内核或 header，无法探测。
                     bail!("please specify kmi manually")
                 } else if let Some(image_path) = &image {
-                    println!(
-                        "- Trying to auto detect KMI version for {}",
-                        image_path.display()
-                    );
+                    println!("- Detecting KMI from {}", image_path.display());
                     parse_kmi_from_boot(image_path)?
                 } else if let Some(kernel_path) = &kernel {
-                    println!(
-                        "- Trying to auto detect KMI version for {}",
-                        kernel_path.display()
-                    );
+                    println!("- Detecting KMI from {}", kernel_path.display());
                     parse_kmi_from_kernel(kernel_path)?
                 } else {
                     String::new()
@@ -874,7 +869,7 @@ pub fn patch(args: BootPatchArgs) -> Result<()> {
         };
 
         #[cfg(target_os = "android")]
-        println!("- Bootdevice: {}", boot_image_file.display());
+        println!("- Boot device: {}", boot_image_file.display());
 
         // 尝试提取 bootctl/busybox
         // bootctl 只在 post_ota() 中需要；这里失败不能影响普通修补或刷写，
@@ -898,7 +893,7 @@ pub fn patch(args: BootPatchArgs) -> Result<()> {
         if let Some(cmdline_value) = &cmdline {
             // 使用固定大小的 cmdline 字段，长度受其容量限制。
             patcher.override_cmdline(cmdline_value.as_bytes());
-            println!("- Set cmdline to: {cmdline_value}");
+            println!("- Setting cmdline to: {cmdline_value}");
         }
 
         if let Some(kernel_path) = kernel {
@@ -954,7 +949,7 @@ pub fn patch(args: BootPatchArgs) -> Result<()> {
             } else {
                 // 部分镜像把 ramdisk 拆分到 init_boot 或 vendor_boot；即使
                 // 当前镜像没有 ramdisk，空归档仍可用于注入载荷。
-                println!("- No ramdisk, create by default");
+                println!("- No ramdisk, creating one");
                 (Cpio::new(), None)
             };
 
@@ -986,7 +981,7 @@ pub fn patch(args: BootPatchArgs) -> Result<()> {
             if (backup || (!is_kernelsu_patched && flash))
                 && let Err(e) = do_backup(&mut cpio, &boot_image_file)
             {
-                println!("- Backup stock image failed: {e:?}");
+                println!("! Backup of stock image failed: {e:?}");
             }
         }
 
