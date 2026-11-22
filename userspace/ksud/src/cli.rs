@@ -494,6 +494,11 @@ enum Kernel {
     },
     /// 通知模块已挂载
     NotifyModuleMounted,
+    /// 将指定进程提升为 root（仅 arm64）
+    SetRoot {
+        /// 目标 pid
+        pid: i32,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -876,6 +881,7 @@ pub fn run() -> Result<()> {
                 ksucalls::report_module_mounted();
                 Ok(())
             }
+            Kernel::SetRoot { pid } => ksucalls::set_process_root(pid),
         },
         Commands::Initrc { command } => match command {
             Initrc::Refresh => regenerate_preinit(),

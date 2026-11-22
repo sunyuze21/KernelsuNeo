@@ -255,6 +255,13 @@ pub fn grant_root() -> Result<()> {
     Ok(())
 }
 
+/// 把指定进程提升为 root（内核侧仅允许 root 调用）。
+pub fn set_process_root(pid: i32) -> Result<()> {
+    let mut cmd = ksu_uapi::ksu_set_process_root_cmd { pid, flags: 0 };
+    ksuctl(ksu_uapi::KSU_IOCTL_SET_PROCESS_ROOT, &raw mut cmd)?;
+    Ok(())
+}
+
 fn report_event(event: u32) {
     let mut cmd = ksu_uapi::ksu_report_event_cmd { event };
     let _ = ksuctl(ksu_uapi::KSU_IOCTL_REPORT_EVENT, &raw mut cmd);
