@@ -10,3 +10,4 @@ __pycache__
 /.build
 /repack-config.json
 /userspace/ksud/.lkm_image_bootstrap.o
+/userspace/ksud/priv.key
