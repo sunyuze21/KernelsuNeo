@@ -13,18 +13,6 @@ import me.weishu.kernelsu.ui.util.rootAvailable
  * @date 2022/12/8.
  */
 object Natives {
-    // minimal supported kernel version
-    // 10915: allowlist breaking change, add app profile
-    // 10931: app profile struct add 'version' field
-    // 10946: add capabilities
-    // 10977: change groups_count and groups to avoid overflow write
-    // 11071: Fix the issue of failing to set a custom SELinux type.
-    // 12143: breaking: new supercall impl
-    // 32310: new get_allow_list ioctl
-    // 32336: new set_sepolicy ioctl
-    // 32377: add set_init_pgrp ioctl
-    // 32513: add uapi version
-    const val MINIMAL_SUPPORTED_KERNEL = 32513
 
     const val KERNEL_SU_DOMAIN = "u:r:ksu:s0"
 
