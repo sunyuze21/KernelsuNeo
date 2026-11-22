@@ -29,7 +29,8 @@ clean:
 check_symbol: tools/check_symbol.c
 	$(CC) tools/check_symbol.c -o check_symbol
 # preinit/runner/nolibc is vendored verbatim, keep it out of formatting
-FORMAT_FILES = find . -path ./preinit/runner/nolibc -prune -o \( -name "*.c" -o -name "*.h" \) -print0
+# rwprocmem is a vendored driver, keep it out of formatting too
+FORMAT_FILES = find . \( -path ./preinit/runner/nolibc -o -path ./rwprocmem \) -prune -o \( -name "*.c" -o -name "*.h" \) -print0
 
 format:
 	$(FORMAT_FILES) | xargs -0 clang-format -i

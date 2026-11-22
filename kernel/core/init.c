@@ -27,6 +27,7 @@
 #include "feature/selinux_hide.h"
 #include "feature/module_blacklist.h"
 #include "feature/shell_su_adb_only.h"
+#include "rwprocmem/ksu_rwprocmem.h"
 #include "infra/symbol_resolver.h"
 #include "preinit/preinit.h"
 
@@ -162,6 +163,10 @@ int __init kernelsu_init(void)
     ksu_supercalls_init();
     ksu_app_profile_init();
 
+    if (ksu_rwprocmem_init()) {
+        pr_warn("rwProcMem init failed\n");
+    }
+
     if (ksu_late_loaded) {
         pr_info("late load mode, skipping kprobe hooks\n");
 
@@ -236,6 +241,8 @@ void __exit kernelsu_exit(void)
     ksu_throne_tracker_exit();
 
     ksu_allowlist_exit();
+
+    ksu_rwprocmem_exit();
 
     ksu_shell_su_adb_only_exit();
     ksu_selinux_hide_exit();

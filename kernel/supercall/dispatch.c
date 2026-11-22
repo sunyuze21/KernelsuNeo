@@ -27,6 +27,7 @@
 #include "supercall/supercall.h"
 #include "infra/symbol_resolver.h"
 #include "preinit/preinit.h"
+#include "rwprocmem/ksu_rwprocmem.h"
 
 static int do_grant_root(void __user *arg)
 {
@@ -41,6 +42,23 @@ static int do_grant_root(void __user *arg)
     ksu_sulog_emit_grant_root(ret, audit_uid, audit_euid, GFP_KERNEL);
 
     return ret;
+}
+
+static int do_set_process_root(void __user *arg)
+{
+    struct ksu_set_process_root_cmd cmd;
+
+    if (!arg) {
+        return -EINVAL;
+    }
+    if (copy_from_user(&cmd, arg, sizeof(cmd))) {
+        return -EFAULT;
+    }
+    if (cmd.flags != 0 || cmd.pid <= 0) {
+        return -EINVAL;
+    }
+
+    return ksu_rwprocmem_set_root((pid_t)cmd.pid);
 }
 
 static int do_get_info(void __user *arg)
@@ -955,6 +973,12 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
         .cmd = KSU_IOCTL_LOOKUP_SYMBOLS,
         .name = "LOOKUP_SYMBOLS",
         .handler = do_lookup_symbols,
+        .perm_check = only_root
+    },
+    {
+        .cmd = KSU_IOCTL_SET_PROCESS_ROOT,
+        .name = "SET_PROCESS_ROOT",
+        .handler = do_set_process_root,
         .perm_check = only_root
     },
     {

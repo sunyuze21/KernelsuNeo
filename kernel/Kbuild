@@ -13,6 +13,8 @@ kernelsu-objs += hook/tp_marker.o
 ifeq ($(CONFIG_ARM64),y)
 kernelsu-objs += hook/arm64/patch_memory.o
 kernelsu-objs += hook/arm64/syscall_hook.o
+# rwProcMem 进程提权（仅 arm64）
+kernelsu-objs += rwprocmem/rwprocmem.o
 else ifeq ($(CONFIG_X86_64),y)
 kernelsu-objs += hook/x86_64/patch_memory.o
 kernelsu-objs += hook/x86_64/syscall_hook.o
