@@ -3,11 +3,13 @@ package me.weishu.kernelsu.data.registry
 import java.net.URI
 import java.net.URLDecoder
 
+/** 注册表 URL 规则：站点根地址、路径安全、https 与下载白名单都在这里集中校验。 */
 object RegistryUrls {
 
     /** Site root of KernelSU Modules. All API paths are resolved against it. */
     const val DEFAULT_BASE_URL = "https://modules.kernelsu.org/"
 
+    /** 索引文档相对路径，相对于站点根。 */
     const val INDEX_PATH = "api/v1/index.json"
 
     /** Hosts a release download may be served from (github.com redirects to these). */
@@ -17,7 +19,9 @@ object RegistryUrls {
         "release-assets.githubusercontent.com",
     )
 
+    /** API 路径允许的字符集；不允许绝对路径与 ".."。 */
     private val API_PATH = Regex("^[A-Za-z0-9._\\-/]+$")
+    /** GitHub owner/repo 单段允许的字符。 */
     private val REPO_PART = Regex("^[A-Za-z0-9._-]+$")
 
     /** Ensures an https base URL ending with '/'. */
@@ -40,6 +44,7 @@ object RegistryUrls {
         return normalizeBaseUrl(baseUrl) + path
     }
 
+    /** 提取小写 host；URL 非法或没有 host 时返回 null。 */
     fun hostOf(url: String): String? = runCatching { URI(url).host?.lowercase() }.getOrNull()
 
     /** An absolute https URL with an ASCII host and no user info (safe to hand to a browser). */
@@ -101,6 +106,7 @@ object RegistryUrls {
         return isSameOrigin(url, registryOrigin)
     }
 
+    /** 解码单个路径段；把 '+' 固定成字面量，避免被表单解码规则当成空格。 */
     private fun decodeSegment(s: String): String? =
         runCatching { URLDecoder.decode(s.replace("+", "%2B"), "UTF-8") }.getOrNull()
 

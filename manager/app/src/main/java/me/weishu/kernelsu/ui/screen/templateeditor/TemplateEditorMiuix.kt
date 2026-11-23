@@ -55,6 +55,9 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 /**
  * @author weishu
  * @date 2023/10/20.
+ *
+ * 模板编辑器的 Miuix 实现。新建时顶栏显示保存按钮，已有模板编辑时显示删除，
+ * 且字段修改会通过上层的 autoSave 立即持久化，因此此处不再单独提供保存按钮。
  */
 @Composable
 fun TemplateEditorScreenMiuix(
@@ -63,6 +66,7 @@ fun TemplateEditorScreenMiuix(
 ) {
     val scrollBehavior = MiuixScrollBehavior()
     val enableBlur = LocalEnableBlur.current
+    // 模糊不可用时用不透明 surface；backdrop 与 barColor 需成对使用。
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
@@ -154,6 +158,7 @@ fun TemplateEditorScreenMiuix(
 }
 
 
+/** Miuix 顶栏：处理返回与删除/新建保存，模糊背景由 [backdrop]/[barColor] 控制。 */
 @Composable
 private fun TopBar(
     title: String,
@@ -217,6 +222,12 @@ private fun TopBar(
     }
 }
 
+/**
+ * 受控文本输入组件。
+ *
+ * 外部 text 变化时用 remember(text) 重建内部状态，确保保存/回填后显示最新值；
+ * 每次输入同时更新本地状态并回调，兼顾即时回显与上层持久化。
+ */
 @Composable
 private fun TextEdit(
     label: String,
@@ -225,6 +236,7 @@ private fun TextEdit(
     enabled: Boolean = true,
     onValueChange: (String) -> Unit = {}
 ) {
+    // 用 text 作为 key：父层数据变化时丢弃旧草稿，避免显示过期输入。
     val editText = remember(text) { mutableStateOf(text) }
     EditText(
         title = label.uppercase(),

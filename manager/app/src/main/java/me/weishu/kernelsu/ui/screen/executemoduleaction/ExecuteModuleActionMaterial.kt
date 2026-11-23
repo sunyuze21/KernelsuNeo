@@ -54,6 +54,13 @@ import me.weishu.kernelsu.ui.component.material.SnackBarHost
 import me.weishu.kernelsu.ui.component.material.TopBarBackButton
 import me.weishu.kernelsu.ui.component.material.expressiveTopAppBarColors
 
+/**
+ * 模块 action 执行页的 Material 实现。
+ *
+ * 输出使用等宽字体并随内容自动滚到底部；FAB 只有在脚本完成后才出现，
+ * 且根据滚动方向自动收起/展开，避免遮挡长日志。执行期间拦截系统返回，
+ * 防止脚本仍在运行时页面被销毁。
+ */
 @SuppressLint("LocalContextGetResourceValueCall")
 @Composable
 fun ExecuteModuleActionScreenMaterial(
@@ -62,6 +69,7 @@ fun ExecuteModuleActionScreenMaterial(
     snackBarHost: SnackbarHostState,
 ) {
     val scrollState = rememberScrollState()
+    // 用 100dp 作为滚动方向判定阈值，过滤手指抖动产生的微小位移。
     val threshold = with(LocalDensity.current) { 100.dp.toPx() }
     val fabExpanded by remember {
         var previousScroll = 0
@@ -86,6 +94,7 @@ fun ExecuteModuleActionScreenMaterial(
         }
     }
 
+    // 脚本未完成时吞掉返回事件，避免误触退出导致输出中断。
     BackHandler(enabled = !state.isComplete) { }
 
     ExpressiveScaffold(
@@ -131,6 +140,7 @@ fun ExecuteModuleActionScreenMaterial(
         val layoutDirection = LocalLayoutDirection.current
         val navBars = WindowInsets.navigationBars.asPaddingValues()
         val captionBar = WindowInsets.captionBar.asPaddingValues()
+        // action 执行期间锁住音量键，防止脚本输出被系统音量条遮挡。
         KeyEventBlocker {
             it.key == Key.VolumeDown || it.key == Key.VolumeUp
         }
@@ -143,6 +153,7 @@ fun ExecuteModuleActionScreenMaterial(
                 )
                 .verticalScroll(scrollState)
         ) {
+            // 每有新输出就滚到底部，模拟终端“跟随最新行”的行为。
             LaunchedEffect(state.text) {
                 scrollState.animateScrollTo(scrollState.maxValue)
             }
@@ -163,6 +174,10 @@ fun ExecuteModuleActionScreenMaterial(
     }
 }
 
+/**
+ * 结果提示卡片：按成功/不适用/失败选择容器与文字颜色。
+ * 颜色全部取自主题 token，保证深色/AMOLED 下对比度仍然可读。
+ */
 @Composable
 private fun ResultNoticeMaterial(notice: ActionResultNotice) {
     val colors = MaterialTheme.colorScheme

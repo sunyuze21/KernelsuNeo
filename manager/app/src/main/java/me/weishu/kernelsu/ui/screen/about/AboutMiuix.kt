@@ -87,6 +87,10 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 import androidx.compose.ui.graphics.BlendMode as ComposeBlendMode
 
+/**
+ * 关于页的 Miuix 布局：使用可折叠顶栏和随滚动淡出的 Logo 区域。
+ * 顶栏标题透明度与 Logo 的滚动进度绑定，滚动到内容区后才完全显现。
+ */
 @Composable
 fun AboutScreenMiuix(
     state: AboutUiState,
@@ -94,8 +98,10 @@ fun AboutScreenMiuix(
 ) {
     val topAppBarScrollBehavior = MiuixScrollBehavior()
     val lazyListState = rememberLazyListState()
+    // Logo 区域高度在布局完成后才能得知，先记录像素值供滚动进度计算。
     var logoHeightPx by remember { mutableIntStateOf(0) }
 
+    // 用首个可见项偏移量计算 0..1 的滚动进度，驱动顶栏颜色与 Logo 淡出。
     val scrollProgress by remember {
         derivedStateOf {
             if (logoHeightPx <= 0) {
@@ -108,8 +114,10 @@ fun AboutScreenMiuix(
         }
     }
 
+    // 模糊背景依赖运行时着色器；不支持时 backdrop 为空，顶栏退化为纯色。
     val enableBlur = LocalEnableBlur.current
     val barBlurBackdrop = rememberBlurBackdrop(enableBlur)
+    // 只有 Logo 完全滚出后才启用模糊，避免内容还在 Logo 区域时就出现色带。
     val blurActive = barBlurBackdrop != null && scrollProgress == 1f
     val barColor = if (blurActive) {
         Color.Transparent
@@ -124,6 +132,7 @@ fun AboutScreenMiuix(
                     title = state.title,
                     scrollBehavior = topAppBarScrollBehavior,
                     color = barColor,
+                    // 标题在 Logo 滚动到 35% 后才逐渐显现，避免与 Logo 文字重叠。
                     titleColor = colorScheme.onSurface.copy(
                         alpha = ((scrollProgress - 0.35f) / 0.65f).coerceIn(0f, 1f),
                     ),
@@ -134,6 +143,7 @@ fun AboutScreenMiuix(
                             val layoutDirection = LocalLayoutDirection.current
                             Icon(
                                 modifier = Modifier.graphicsLayer {
+                                    // RTL 语言下把返回箭头水平翻转。
                                     if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
                                 },
                                 imageVector = MiuixIcons.Back,
@@ -162,6 +172,7 @@ fun AboutScreenMiuix(
     }
 }
 
+/** 关于页主体：负责 Logo 视差、动态背景和链接列表。 */
 @Composable
 private fun AboutContent(
     state: AboutUiState,
@@ -175,13 +186,16 @@ private fun AboutContent(
     val layoutDirection = LocalLayoutDirection.current
     val density = LocalDensity.current
 
+    // 内容卡片与 Logo 的模糊共享同一 backdrop，保证模糊采样一致。
     val backdrop = rememberLayerBackdrop()
 
     val isInDark = isInDarkTheme()
     val enableBlur = LocalEnableBlur.current
+    // 动态背景需要运行时着色器，且仅 Android 15（VANILLA_ICE_CREAM）及以上支持。
     val effectBackground =
         remember(enableBlur) { isRuntimeShaderSupported() && enableBlur && Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM }
 
+    // 深浅色使用不同的混合参数，否则 Logo 在深色背景上会失去对比度。
     val blendColors = remember(isInDark) {
         if (isInDark) ColorBlendToken.Overlay_Thin_Light
         else ColorBlendToken.Pured_Regular_Light
@@ -203,17 +217,21 @@ private fun AboutContent(
     }
 
     // Logo parallax/fade tracking
+    // 这些像素坐标在首次布局后固定，用于把滚动偏移拆成三段动画。
     var logoHeightDp by remember { mutableStateOf(300.dp) }
     var logoAreaY by remember { mutableFloatStateOf(0f) }
     var iconY by remember { mutableFloatStateOf(0f) }
     var projectNameY by remember { mutableFloatStateOf(0f) }
     var versionCodeY by remember { mutableFloatStateOf(0f) }
 
+    // 三段进度分别控制图标、应用名和版本号的透明度与缩放。
     var iconProgress by remember { mutableFloatStateOf(0f) }
     var projectNameProgress by remember { mutableFloatStateOf(0f) }
     var versionCodeProgress by remember { mutableFloatStateOf(0f) }
+    // 滚动容器的初始顶部偏移，用于消除首次测量不稳定带来的抖动。
     var initialLogoAreaY by remember { mutableFloatStateOf(0f) }
 
+    // 监听滚动偏移，按固定坐标计算三段错峰淡出动画。
     LaunchedEffect(lazyListState) {
         snapshotFlow { lazyListState.firstVisibleItemScrollOffset }
             .onEach { offset ->
@@ -229,6 +247,7 @@ private fun AboutContent(
                 }
                 val refLogoAreaY = if (initialLogoAreaY > 0f) initialLogoAreaY else logoAreaY
 
+                // 以版本号、应用名、图标的测量位置为界，把滚动距离拆成三段。
                 val stage1TotalLength = refLogoAreaY - versionCodeY
                 val stage2TotalLength = versionCodeY - projectNameY
                 val stage3TotalLength = projectNameY - iconY
@@ -244,17 +263,20 @@ private fun AboutContent(
             .collect { }
     }
 
+    // 内容列表沿用 Scaffold 的内边距，并单独处理左右安全区。
     val scrollPadding = PaddingValues(
         top = innerPadding.calculateTopPadding(),
         start = innerPadding.calculateStartPadding(layoutDirection),
         end = innerPadding.calculateEndPadding(layoutDirection),
     )
+    // Logo 区额外下移 40.dp，为顶栏留出视觉空间。
     val logoPadding = PaddingValues(
         top = innerPadding.calculateTopPadding() + 40.dp,
         start = innerPadding.calculateStartPadding(layoutDirection),
         end = innerPadding.calculateEndPadding(layoutDirection),
     )
 
+    // 背景随滚动逐渐淡出，最终露出纯内容背景。
     BgEffectBackground(
         dynamicBackground = effectBackground,
         modifier = Modifier.fillMaxSize(),
@@ -427,6 +449,7 @@ private fun AboutContent(
                             Color.Transparent,
                         ),
                     ) {
+                        // links 已按解析顺序排好，直接逐条渲染为可点击项。
                         state.links.forEach {
                             ArrowPreference(
                                 title = it.fullText,

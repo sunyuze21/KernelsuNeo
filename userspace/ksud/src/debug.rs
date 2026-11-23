@@ -4,30 +4,25 @@
 //! 和进程标记管理。标记命令以 pid 为参数；set/unset 时 pid 0 表示所有进程。
 
 use anyhow::{Context, Ok, Result, bail, ensure};
-use std::{
-    ffi::CString,
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{ffi::CString, fs, path::Path, process::Command};
 
 use crate::ksucalls;
 
+/// 内核模块在 sysfs 中的根路径，仅 CONFIG_KSU_DEBUG 构建会暴露调试参数。
 const KERNEL_PARAM_PATH: &str = "/sys/module/kernelsu";
 
 /// 从 sysfs 属性读取一个 u32，并去掉行尾换行。
-fn read_u32(path: &PathBuf) -> Result<u32> {
-    let content = std::fs::read_to_string(path)?;
-    let content = content.trim();
-    let content = content.parse::<u32>()?;
-    Ok(content)
+fn read_u32(path: &Path) -> Result<u32> {
+    let raw = std::fs::read_to_string(path)?;
+    Ok(raw.trim().parse::<u32>()?)
 }
 
 /// 覆写调试用 manager appid 内核参数，并打印变更前后的值。
-fn set_kernel_param(appid: u32) -> Result<()> {
+fn set_manager_appid(appid: u32) -> Result<()> {
     let kernel_param_path = Path::new(KERNEL_PARAM_PATH).join("parameters");
 
     let ksu_debug_manager_appid = kernel_param_path.join("ksu_debug_manager_appid");
+    // 前后各读一次，便于在内核拒绝写入时从输出中看出实际值。
     let before_appid = read_u32(&ksu_debug_manager_appid)?;
     std::fs::write(&ksu_debug_manager_appid, appid.to_string())?;
     let after_appid = read_u32(&ksu_debug_manager_appid)?;
@@ -60,7 +55,7 @@ pub fn set_manager(pkg: &str) -> Result<()> {
     );
 
     let appid = get_pkg_appid(pkg)?;
-    set_kernel_param(appid)?;
+    set_manager_appid(appid)?;
     // 强制停止该进程
     // 强制停止，使运行中的实例带着新 appid 重启。
     let _ = Command::new("am").args(["force-stop", pkg]).status();
@@ -74,6 +69,7 @@ pub fn set_manager(pkg: &str) -> Result<()> {
 pub fn insmod(module: &Path, params: &[String]) -> Result<()> {
     // KSU_IOCTL_LOOKUP_SYMBOLS 在 UAPI v6 中引入。优先通过它解析模块的
     // 未定义（未导出）符号；较旧的内核，或解析失败时，回退到 /proc/kallsyms。
+    // 该阈值决定走新接口还是 /proc/kallsyms，不能随意降低。
     const LOOKUP_SYMBOL_UAPI_VERSION: u32 = 6;
 
     let module = module

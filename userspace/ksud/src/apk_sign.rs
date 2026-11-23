@@ -67,6 +67,7 @@ pub fn get_apk_signature(apk: &str) -> Result<(u32, String)> {
 
     ensure!(size_of_block == size8, "not a signed apk");
 
+    // 只记录 v2 的首个签名者；v3/v3.1 只记录存在性，最终统一拒绝以避免歧义。
     let mut v2_signing: Option<(u32, String)> = None;
     let mut v3_signing_exist = false;
     let mut v3_1_signing_exist = false;
@@ -135,6 +136,7 @@ fn calc_cert_sha256(
     *offset += 0x4 * 2;
 
     let cert_len = u32::from_le_bytes(*size4);
+    // 证书长度来自不可信 APK，按声明长度一次性读入；不足时 read_exact 会报错。
     let mut cert: Vec<u8> = vec![0; cert_len as usize];
     f.read_exact(&mut cert)?;
     *offset += cert_len;

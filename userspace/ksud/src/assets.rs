@@ -14,8 +14,11 @@ mod android {
     use crate::utils::ensure_binary;
     use const_format::concatcp;
 
+    /// 解压后的 resetprop 路径；它是指向 ksud 的软链接。
     pub const RESETPROP_PATH: &str = concatcp!(BINARY_DIR, "resetprop");
+    /// 解压后的 busybox 路径。
     pub const BUSYBOX_PATH: &str = concatcp!(BINARY_DIR, "busybox");
+    /// 解压后的 bootctl 路径。
     pub const BOOTCTL_PATH: &str = concatcp!(BINARY_DIR, "bootctl");
 
     /// 把所有嵌入的辅助二进制解压到 `BINARY_DIR`。
@@ -49,22 +52,26 @@ pub use android::*;
 
 // Android 上只需要本机架构的辅助文件，嵌入其他架构会让二进制变大。
 // 主机构建保留所有架构，以便刷入 boot 时为目标设备打包对应的 ksuinit。
+/// Android/x86_64 目标嵌入的辅助二进制资源。
 #[cfg(all(target_arch = "x86_64", target_os = "android"))]
 #[derive(RustEmbed)]
 #[folder = "bin/x86_64"]
 struct Asset;
 
+/// Android/aarch64 目标嵌入的辅助二进制资源。
 #[cfg(all(target_arch = "aarch64", target_os = "android"))]
 #[derive(RustEmbed)]
 #[folder = "bin/aarch64"]
 struct Asset;
 
+/// Android/riscv64 目标嵌入的辅助二进制资源。
 #[cfg(all(target_arch = "riscv64", target_os = "android"))]
 #[derive(RustEmbed)]
 #[folder = "bin/riscv64"]
 struct Asset;
 
 // 若非 Android，例如 macos、linux、windows，则包含所有架构。
+/// 宿主机目标嵌入全部架构的资源，便于离线修补任意设备的 boot 镜像。
 #[cfg(not(target_os = "android"))]
 #[derive(RustEmbed)]
 #[folder = "bin"]
@@ -81,7 +88,7 @@ pub fn get_asset_data(name: &str) -> Result<std::borrow::Cow<'static, [u8]>> {
 ///
 /// 这里抹掉具体的 `Cow` 类型，使只需要 `AsRef<[u8]>` 的调用方（例如与主机
 /// 共享的 boot-patch 代码）不必依赖嵌入器的生命周期类型。
-pub fn get_asset(name: &str) -> Result<Box<dyn AsRef<[u8]>>> {
+pub fn get_asset_boxed(name: &str) -> Result<Box<dyn AsRef<[u8]>>> {
     let asset = Asset::get(name).ok_or_else(|| anyhow::anyhow!("asset not found: {name}"))?;
     Ok(Box::new(asset.data))
 }
@@ -90,7 +97,7 @@ pub fn get_asset(name: &str) -> Result<Box<dyn AsRef<[u8]>>> {
 ///
 /// 文件名约定是 `<kmi>_kernelsu.ko`，去掉后缀即可得到 KMI 名称，
 /// 供安装器展示给用户。
-pub fn list_supported_kmi() -> std::vec::Vec<std::string::String> {
+pub fn list_supported_kmi() -> Vec<String> {
     let mut list = Vec::new();
     for file in Asset::iter() {
         // kmi_name = "xxx_kernelsu.ko"

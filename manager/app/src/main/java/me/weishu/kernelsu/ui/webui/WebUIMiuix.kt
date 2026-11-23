@@ -25,6 +25,11 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.window.WindowDialog
 
+/**
+ * Miuix 风格下处理 WebUI 的 JS 对话框与文件选择事件。
+ *
+ * 每个分支都必须在关闭时回调 WebUIState，确保对应的 JS 调用返回。
+ */
 @Composable
 fun HandleWebUIEventMiuix(
     webUIState: WebUIState,
@@ -133,6 +138,7 @@ fun HandleWebUIEventMiuix(
         }
 
         is WebUIEvent.ShowFileChooser -> {
+            // 启动系统文件选择器；异常时回调 null，避免网页 input 永久挂起。
             LaunchedEffect(event) {
                 try {
                     fileLauncher.launch(event.intent)

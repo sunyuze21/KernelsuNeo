@@ -67,12 +67,20 @@ import top.yukonga.miuix.kmp.icon.extended.Download
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
+/**
+ * 模块 action 执行页的 Miuix 实现。
+ *
+ * 与 Material 版语义一致：执行中屏蔽返回、输出自动滚底、完成后显示关闭 FAB。
+ * 差异在于 FAB 通过位移动画隐藏/出现，而不是缩成图标，因此需要额外的
+ * 偏移状态与模糊栏背景处理。
+ */
 @Composable
 fun ExecuteModuleActionScreenMiuix(
     state: ExecuteModuleActionUiState,
     actions: ExecuteModuleActionScreenActions,
 ) {
     val scrollState = rememberScrollState()
+    // 滚动方向判定阈值，避免微小滚动导致 FAB 频繁闪烁。
     val threshold = with(LocalDensity.current) { 100.dp.toPx() }
     val fabVisible by remember {
         var previousScroll = 0
@@ -101,10 +109,12 @@ fun ExecuteModuleActionScreenMiuix(
         animationSpec = tween(durationMillis = 350),
     )
     val enableBlur = LocalEnableBlur.current
+    // 模糊不可用时 backdrop 为 null，栏背景改用不透明 surface。
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
+    // 执行期间屏蔽返回，避免用户在脚本仍在输出时退出页面。
     BackHandler(enabled = !state.isComplete) { }
 
     Scaffold(
@@ -163,6 +173,7 @@ fun ExecuteModuleActionScreenMiuix(
                     )
                     .verticalScroll(scrollState),
             ) {
+                // 输出更新时自动滚到末尾，保持最新日志可见。
                 LaunchedEffect(state.text) {
                     scrollState.animateScrollTo(scrollState.maxValue)
                 }
@@ -185,6 +196,11 @@ fun ExecuteModuleActionScreenMiuix(
     }
 }
 
+/**
+ * Miuix 顶栏：封装返回、保存日志与标题，并在模糊可用时透出背景。
+ *
+ * [backdrop] 为 null 时 [barColor] 应是不透明色，两者必须配套传入。
+ */
 @Composable
 private fun TopBar(
     onBack: () -> Unit = {},
@@ -227,6 +243,7 @@ private fun TopBar(
     }
 }
 
+/** 结果提示：按结果语义选择主题色文字，不做卡片着色以贴合 Miuix 风格。 */
 @Composable
 private fun ResultNoticeMiuix(notice: ActionResultNotice) {
     val color = when (notice.kind) {

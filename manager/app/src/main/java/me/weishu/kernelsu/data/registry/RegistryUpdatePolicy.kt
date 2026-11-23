@@ -7,7 +7,9 @@ sealed interface UpdateVerification {
 
     /** The update is a registry release: enforce its URL allowlist, size and SHA-256. */
     data class Registry(
+        /** 经过白名单校验的发布 ZIP 地址。 */
         val zipUrl: String,
+        /** 下载时必须满足的大小与哈希。 */
         val expected: ExpectedFile,
         val release: ApiRelease,
     ) : UpdateVerification
@@ -34,6 +36,10 @@ sealed interface UpdateVerification {
  */
 object RegistryUpdatePolicy {
 
+    /**
+     * 判定逻辑核心：先看 updateJson 是否由注册表托管，再按 zipUrl 匹配发布；
+     * 无法证明来自注册表的更新一律降级为 Legacy 或被拒绝，绝不会无校验下载注册表元数据。
+     */
     fun decide(
         registryBaseUrl: String,
         updateJsonUrl: String,
@@ -43,6 +49,7 @@ object RegistryUpdatePolicy {
         inIndex: Boolean?,
         detail: ApiModuleDetail?,
     ): UpdateVerification {
+        // updateJson 与注册表同源时，其内容必须能被注册表验证。
         val fromRegistry = RegistryUrls.isSameOrigin(updateJsonUrl, registryBaseUrl)
         if (inIndex == false) {
             return if (fromRegistry) UpdateVerification.Rejected("module is not in the registry index") else UpdateVerification.Legacy

@@ -19,6 +19,7 @@ fun <T> ObserveAsEvents(
     onEvent: suspend (T) -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    // 随 lifecycle 状态启停收集：低于 minActiveState 时停止，恢复后继续，防止后台消费事件
     LaunchedEffect(events, lifecycleOwner, minActiveState) {
         lifecycleOwner.repeatOnLifecycle(minActiveState) {
             events.collect { onEvent(it) }

@@ -8,6 +8,7 @@ object RegistryLocale {
 
     /** UI locales of the public site (https://modules.kernelsu.org/{locale}/modules/{id}/). */
     const val SITE_LOCALE_EN = "en"
+    /** 简体中文站点 locale。 */
     const val SITE_LOCALE_ZH_CN = "zh-CN"
 
     /** Script implied by a Chinese region (CLDR likely subtags). */
@@ -23,15 +24,18 @@ object RegistryLocale {
      * -> en.
      */
     fun siteLocale(requested: String): String {
+        // 同时兼容 BCP 47 "-" 与 Java "_" 写法，并忽略空段。
         val parts = requested.trim().replace('_', '-').split('-').filter { it.isNotEmpty() }
         if (parts.isEmpty() || !parts[0].equals("zh", ignoreCase = true)) return SITE_LOCALE_EN
         var i = 1
         var script: String? = null
+        // 4 字母段是 script subtag（Hans/Hant），优先于地区推断。
         if (i < parts.size && parts[i].length == 4 && parts[i].all { it.isLetter() }) {
             script = parts[i].lowercase().replaceFirstChar { it.uppercaseChar() }
             i++
         }
         val region = parts.getOrNull(i)?.takeIf { it.length == 2 && it.all(Char::isLetter) }?.uppercase()
+        // 没有 script 时按 CLDR 的“地区 -> 文字”映射推断，默认简体。
         val effective = script ?: region?.let { chineseRegionScripts[it] } ?: "Hans"
         return if (effective == "Hans") SITE_LOCALE_ZH_CN else SITE_LOCALE_EN
     }

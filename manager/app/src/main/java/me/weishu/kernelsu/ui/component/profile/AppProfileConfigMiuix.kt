@@ -14,6 +14,10 @@ import me.weishu.kernelsu.R
 import me.weishu.kernelsu.ui.component.miuix.EditText
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 
+/**
+ * Miuix 版应用 profile 配置：名称输入 + “卸载模块”开关。
+ * 与 Material 版一致，所有变更通过 copy 后回调，不在此持有可变的 profile。
+ */
 @Composable
 fun AppProfileConfigMiuix(
     modifier: Modifier = Modifier,
@@ -35,6 +39,7 @@ fun AppProfileConfigMiuix(
         SwitchPreference(
             title = stringResource(R.string.profile_umount_modules),
             summary = stringResource(R.string.profile_umount_modules_summary),
+            // 未启用自定义 profile 时回退到内核默认值
             checked = if (enabled) {
                 profile.umountModules
             } else {
@@ -42,6 +47,7 @@ fun AppProfileConfigMiuix(
             },
             enabled = enabled,
             onCheckedChange = {
+                // 用户显式修改后不再继承默认策略
                 onProfileChange(
                     profile.copy(
                         umountModules = it,
@@ -53,6 +59,9 @@ fun AppProfileConfigMiuix(
     }
 }
 
+/**
+ * 设计预览：固定名称、禁用状态下检查布局，不参与运行时逻辑。
+ */
 @Preview
 @Composable
 private fun AppProfileConfigPreview() {

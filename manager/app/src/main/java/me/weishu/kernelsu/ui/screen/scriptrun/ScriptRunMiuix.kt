@@ -76,6 +76,12 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
+/**
+ * 脚本运行页的 Miuix 实现：结构上与 Material 版一致，仅控件与动效不同。
+ *
+ * 准备阶段显示无限进度；失败时展示错误卡片，并在允许时提供“仍作为模块安装”
+ * 的入口。所有输入仍以 [ScriptRunUiState] 为准。
+ */
 @Composable
 internal fun ScriptRunScreenMiuix(
     state: ScriptRunUiState,
@@ -83,6 +89,7 @@ internal fun ScriptRunScreenMiuix(
 ) {
     val enableBlur = LocalEnableBlur.current
     val scrollBehavior = MiuixScrollBehavior()
+    // 模糊不可用时使用不透明 surface，避免顶栏内容与正文混在一起。
     val backdrop = rememberBlurBackdrop(enableBlur)
     val barColor = if (backdrop != null) Color.Transparent else colorScheme.surface
 
@@ -98,6 +105,7 @@ internal fun ScriptRunScreenMiuix(
         popupHost = { },
         contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal)
     ) { innerPadding ->
+        // 解析未完成且未失败时展示准备中状态；其余情况进入列表。
         val prepared = state.prepared
         Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
             if (prepared == null && state.phase != ScriptRunPhase.FAILED) {
@@ -160,9 +168,11 @@ internal fun ScriptRunScreenMiuix(
     }
 }
 
+/** 脚本信息卡片：把 manifest 的名称、版本、作者与描述合并成摘要展示。 */
 @Composable
 private fun ScriptInfoMiuix(state: ScriptRunUiState, prepared: PreparedScript, actions: ScriptRunActions) {
     val context = LocalContext.current
+    // manifest 字段允许为空，拼接摘要时逐项判空白。
     val manifest = prepared.manifest
     Card(modifier = Modifier.fillMaxWidth()) {
         BasicComponent(
@@ -202,6 +212,7 @@ private fun InstallAnywayCardMiuix(actions: ScriptRunActions) {
     }
 }
 
+/** 参数表单：无参数时不渲染标题与卡片，保持页面紧凑。 */
 @Composable
 private fun ParamsFormMiuix(state: ScriptRunUiState, prepared: PreparedScript, actions: ScriptRunActions) {
     val params = prepared.params.params
@@ -209,6 +220,7 @@ private fun ParamsFormMiuix(state: ScriptRunUiState, prepared: PreparedScript, a
     SmallTitle(text = stringResource(R.string.script_params), modifier = Modifier.padding(top = 6.dp))
     Card(modifier = Modifier.fillMaxWidth()) {
         params.forEach { param ->
+            // 未输入时使用脚本默认值；错误来自 ViewModel 的统一校验结果。
             val value = state.values[param.key] ?: param.defaultValue
             val error = state.errors[param.key]
             when (param) {
@@ -246,6 +258,7 @@ private fun ParamsFormMiuix(state: ScriptRunUiState, prepared: PreparedScript, a
     }
 }
 
+/** 可展开源码区；展开后用高亮文本横向滚动展示，避免长命令被迫换行。 */
 @Composable
 private fun SourceSectionMiuix(prepared: PreparedScript) {
     var expanded by rememberSaveable { mutableStateOf(false) }
@@ -268,6 +281,7 @@ private fun SourceSectionMiuix(prepared: PreparedScript) {
             }
         )
         if (expanded) {
+            // 高亮底色跟随 surfaceContainer，保证与卡片背景协调。
             val source = rememberShellHighlight(
                 prepared.actionSource,
                 ShellHighlightColors.forBackground(colorScheme.surfaceContainer),
@@ -287,6 +301,7 @@ private fun SourceSectionMiuix(prepared: PreparedScript) {
     }
 }
 
+/** Miuix 顶栏：在模糊可用时透出背景，[backdrop] 与 [barColor] 需成对使用。 */
 @Composable
 private fun TopBar(
     onBack: () -> Unit,

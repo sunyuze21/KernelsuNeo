@@ -23,10 +23,14 @@ use log::{LevelFilter, error, info};
 #[derive(Parser, Debug)]
 #[command(author, version = defs::FULL_VERSION, about, long_about = None)]
 struct Args {
+    /// 解析后的顶层子命令；`run` 依赖它决定分发路径。
     #[command(subcommand)]
     command: Commands,
 }
 
+/// 顶层子命令集合，对应 `ksud <command>` 的完整命令面。
+///
+/// 变体名称即 CLI 兼容性契约，模块脚本和 Manager 会按名称调用，不能随意重命名。
 #[derive(clap::Subcommand, Debug)]
 enum Commands {
     /// 管理 KernelSU 模块
@@ -161,6 +165,7 @@ enum Commands {
     },
 }
 
+/// `boot-info` 子命令：以机器可读方式输出 boot 相关探测结果。
 #[derive(clap::Subcommand, Debug)]
 enum BootInfo {
     /// 显示当前 KMI 版本
@@ -186,6 +191,7 @@ enum BootInfo {
     },
 }
 
+/// `debug` 子命令：仅用于开发调试，部分能力依赖 CONFIG_KSU_DEBUG。
 #[derive(clap::Subcommand, Debug)]
 enum Debug {
     /// 设置 manager 应用，需要内核启用 CONFIG_KSU_DEBUG。
@@ -238,6 +244,7 @@ enum Debug {
     Package,
 }
 
+/// 进程标记子命令；pid 0 在 set/unset 中表示“全部进程”。
 #[derive(clap::Subcommand, Debug)]
 enum MarkCommand {
     /// 获取某个进程（或全部进程）的标记状态
@@ -265,6 +272,7 @@ enum MarkCommand {
     Refresh,
 }
 
+/// SELinux 策略操作子命令，最终都通过内核 supercall 生效。
 #[derive(clap::Subcommand, Debug)]
 enum Sepolicy {
     /// 修补 sepolicy
@@ -286,6 +294,7 @@ enum Sepolicy {
     },
 }
 
+/// 模块管理子命令；调用前 `run` 已切换到 init 挂载命名空间。
 #[derive(clap::Subcommand, Debug)]
 enum Module {
     /// 安装模块 <ZIP>
@@ -314,12 +323,14 @@ enum Module {
 
     /// 禁用模块 <id>
     Disable {
+        /// 要禁用的模块 id，对应 `/data/adb/modules` 下的目录名。
         // 模块 id
         id: String,
     },
 
     /// 运行模块 <id> 的 action
     Action {
+        /// 要触发 action 的模块 id，必须位于模块目录中。
         // 模块 id
         id: String,
     },
@@ -348,6 +359,7 @@ enum Module {
     },
 }
 
+/// 模块签名校验开关。
 #[derive(clap::Subcommand, Debug)]
 enum IntegrityStatus {
     /// 启用模块签名校验
@@ -355,6 +367,7 @@ enum IntegrityStatus {
     /// 关闭模块签名校验
     Disable,
 }
+/// preinit 状态查询与失败计数重置。
 #[derive(clap::Subcommand, Debug)]
 enum PreinitCmd {
     /// 显示下次开机时各模块的 preinit 状态
@@ -363,6 +376,7 @@ enum PreinitCmd {
     Reset,
 }
 
+/// 模块配置子命令；`--temp` 决定写入临时层还是持久层。
 #[derive(clap::Subcommand, Debug)]
 enum ModuleConfigCmd {
     /// 获取配置值
@@ -405,6 +419,7 @@ enum ModuleConfigCmd {
     },
 }
 
+/// App Profile 子命令：管理每个应用的 root 策略与 sepolicy 模板。
 #[derive(clap::Subcommand, Debug)]
 enum Profile {
     /// 获取 <package-name> 的 root profile selinux 策略
@@ -445,6 +460,7 @@ enum Profile {
     ListTemplates,
 }
 
+/// 内核特性开关子命令；id 支持名称或线上数值，二者都对应固定契约。
 #[derive(clap::Subcommand, Debug)]
 enum Feature {
     /// 获取特性值及支持状态
@@ -480,6 +496,7 @@ enum Feature {
     Save,
 }
 
+/// 直接操作内核接口的子命令，多用于模块挂载流程。
 #[derive(clap::Subcommand, Debug)]
 enum Kernel {
     /// 清除 ext4 sysfs
@@ -501,6 +518,7 @@ enum Kernel {
     },
 }
 
+/// 内核 umount 列表操作。
 #[derive(clap::Subcommand, Debug)]
 enum UmountOp {
     /// 将挂载点添加到 umount 列表
@@ -520,12 +538,18 @@ enum UmountOp {
     Wipe,
 }
 
+/// initrc 注入相关子命令。
 #[derive(clap::Subcommand, Debug)]
 enum Initrc {
     /// 重新生成 preinit rc 文件和 preinit 目录
     Refresh,
 }
 
+/// ksud 的主入口：初始化日志与信号处理，处理 `argv[0]` 兼容入口，
+/// 解析并分发子命令。
+///
+/// 返回责任链式错误；除 `boot-info` 外，错误还会写入 logcat，因为模块/init
+/// 脚本通常只能通过日志排障。调用方需保证已在正确的挂载命名空间中运行。
 pub fn run() -> Result<()> {
     // 日志写入 logcat，标签为 `KernelSU`。调试构建使用 Trace 级别，
     // 排查模块问题无需重新编译。
@@ -552,6 +576,7 @@ pub fn run() -> Result<()> {
         crate::resetprop::resetprop_main(&all_args)
     }
 
+    // clap 解析失败会直接以非零状态退出并打印用法，不会进入下面的分发。
     let cli = Args::parse();
 
     log::info!("command: {:?}", cli.command);
@@ -571,126 +596,7 @@ pub fn run() -> Result<()> {
             // 模块操作必须在 init 的（全局）挂载命名空间中执行，
             // 这样看到的模块目录才是真实目录，而不是某个应用的视图。
             utils::switch_mnt_ns(1)?;
-            match command {
-                Module::Install { zip } => module::install_module(&zip),
-                Module::UndoUninstall { id } => module::undo_uninstall_module(&id),
-                Module::Uninstall { id } => module::uninstall_module(&id),
-                Module::Enable { id } => module::enable_module(&id),
-                Module::Disable { id } => module::disable_module(&id),
-                Module::Action { id } => module::run_action(&id),
-                Module::List => module::list_modules(),
-                Module::Preinit { command } => match command {
-                    PreinitCmd::Status => {
-                        crate::preinit::print_status();
-                        Ok(())
-                    }
-                    PreinitCmd::Reset => crate::preinit::reset_bootcount(),
-                },
-                Module::Integrity { command } => match command {
-                    IntegrityStatus::Enable => {
-                        enable_integrity()?;
-                        println!("Module signature verification enabled");
-                        Ok(())
-                    }
-                    IntegrityStatus::Disable => {
-                        disable_integrity()?;
-                        println!("Module signature verification disabled");
-                        Ok(())
-                    }
-                },
-                Module::Config { internal, command } => {
-                    // 模块脚本的环境变量中带有 `KSU_MODULE`；
-                    // `--internal` 用于 ksud 自有的伪模块。
-                    let module_id = match internal {
-                        Some(internal_name) => format!("internal.{internal_name}"),
-                        None => std::env::var("KSU_MODULE").map_err(|_| {
-                            anyhow::anyhow!(
-                                "This command must be run in the context of a module or passed --internal <name>"
-                            )
-                        })?,
-                    };
-                    crate::module::validate_module_id(&module_id)?;
-
-                    match command {
-                        ModuleConfigCmd::Get { key } => {
-                            // 使用 merge_configs 以遵循优先级（temp 覆盖 persist）
-                            let config = module_config::merge_configs(&module_id)?;
-                            match config.get(&key) {
-                                Some(value) => {
-                                    println!("{value}");
-                                    Ok(())
-                                }
-                                None => anyhow::bail!("Key '{key}' not found"),
-                            }
-                        }
-                        ModuleConfigCmd::Set {
-                            key,
-                            value,
-                            stdin,
-                            temp,
-                        } => {
-                            // 在 CLI 层校验 key，以便提供更好的用户体验
-                            module_config::validate_config_key(&key)?;
-
-                            // 从 stdin 或参数读取值
-                            let value_str = match value {
-                                Some(v) if !stdin => v,
-                                _ => {
-                                    // 从 stdin 读取
-                                    use std::io::Read;
-                                    let mut buffer = String::new();
-                                    std::io::stdin()
-                                        .read_to_string(&mut buffer)
-                                        .context("Failed to read from stdin")?;
-                                    buffer
-                                }
-                            };
-
-                            // 校验值
-                            module_config::validate_config_value(&value_str)?;
-
-                            let config_type = if temp {
-                                module_config::ConfigType::Temp
-                            } else {
-                                module_config::ConfigType::Persist
-                            };
-                            module_config::set_config_value(
-                                &module_id,
-                                &key,
-                                &value_str,
-                                config_type,
-                            )
-                        }
-                        ModuleConfigCmd::List => {
-                            let config = module_config::merge_configs(&module_id)?;
-                            if config.is_empty() {
-                                println!("No config entries found");
-                            } else {
-                                for (key, value) in config {
-                                    println!("{key}={value}");
-                                }
-                            }
-                            Ok(())
-                        }
-                        ModuleConfigCmd::Delete { key, temp } => {
-                            let config_type = if temp {
-                                module_config::ConfigType::Temp
-                            } else {
-                                module_config::ConfigType::Persist
-                            };
-                            module_config::delete_config_value(&module_id, &key, config_type)
-                        }
-                        ModuleConfigCmd::Clear { temp } => {
-                            let config_type = if temp {
-                                module_config::ConfigType::Temp
-                            } else {
-                                module_config::ConfigType::Persist
-                            };
-                            module_config::clear_config(&module_id, config_type)
-                        }
-                    }
-                }
-            }
+            run_module_command(command)
         }
         Commands::Install {
             libadbroot,
@@ -713,12 +619,14 @@ pub fn run() -> Result<()> {
             // `--magica` 走基于 adb root 的延迟加载路径，
             // 与下面正常的 LKM 加载流程相互独立。
             if let Some(port) = magica {
-                return crate::magica::run(port, &package_name, allow_shell).map_err(|e| {
-                    error!("Error running magica: {e}");
-                    e
-                });
+                return crate::magica::run_via_adb_root(port, &package_name, allow_shell).map_err(
+                    |e| {
+                        error!("Error running magica: {e}");
+                        e
+                    },
+                );
             }
-            let result = crate::late_load::run(&package_name, kmi, allow_shell);
+            let result = crate::late_load::run_lkm_load(&package_name, kmi, allow_shell);
             if post_magica {
                 info!("Restoring adb properties (post-magica cleanup)...");
                 if let Err(e) = crate::magica::disable_adb_root() {
@@ -767,104 +675,17 @@ pub fn run() -> Result<()> {
             Feature::Save => crate::feature::save_config(),
         },
 
-        Commands::Debug { command } => match command {
-            Debug::SetManager { apk } => debug::set_manager(&apk),
-            Debug::GetSign { apk } => {
-                let sign = apk_sign::get_apk_signature(&apk)?;
-                println!("size: {:#x}, hash: {}", sign.0, sign.1);
-                Ok(())
-            }
-            Debug::Version => {
-                println!("Kernel Version: {}", ksucalls::get_version());
-                Ok(())
-            }
-            Debug::Su { global_mnt } => crate::su::grant_root(global_mnt),
-            Debug::Test => assets::ensure_binaries(false),
-            Debug::ExtractBinary { name, path } => {
-                let data = assets::get_asset_data(&name)?;
-                utils::ensure_binary(&path, &data, false)
-            }
-            Debug::Mark { command } => match command {
-                MarkCommand::Get { pid } => debug::mark_get(pid),
-                MarkCommand::Mark { pid } => debug::mark_set(pid),
-                MarkCommand::Unmark { pid } => debug::mark_unset(pid),
-                MarkCommand::Refresh => debug::mark_refresh(),
-            },
-            Debug::Sulogd => sulog::ensure_sulogd_running(),
-            Debug::Info => {
-                let info = ksucalls::get_info();
-                println!("version: {}", info.version);
-                println!("flags: 0x{:x}", info.flags);
-                println!("uapi_version: {}", info.uapi_version);
-                println!("features: 0x{:x}", info.features);
-                println!("lkm: {}", ksucalls::is_lkm());
-                println!(
-                    "bundled: {}",
-                    (info.flags & ksu_uapi::KSU_GET_INFO_FLAG_BUNDLED) != 0
-                );
-                println!("late_load: {}", ksucalls::is_late_load());
-                println!("runtime_mode: {}", ksucalls::runtime_mode());
-                println!(
-                    "pr_build: {}",
-                    (info.flags & ksu_uapi::KSU_GET_INFO_FLAG_PR_BUILD) != 0
-                );
-                Ok(())
-            }
-            Debug::Package => {
-                println!("{}", defs::DEFAULT_PACKAGE_NAME);
-                Ok(())
-            }
-        },
+        Commands::Debug { command } => run_debug_command(command),
 
         Commands::BootPatch(boot_patch) => crate::boot_patch::patch(boot_patch),
 
         // BootInfo 输出的是供 Manager 和安装脚本解析的机器可读内容。
         // 这里直接返回，避免失败后再打印下面通用的 "Error:" 日志行污染 stdout。
-        Commands::BootInfo { command } => {
-            return match command {
-                BootInfo::CurrentKmi => {
-                    let kmi = crate::boot_patch::get_current_kmi()?;
-                    println!("{kmi}");
-                    Ok(())
-                }
-                BootInfo::SupportedKmis => {
-                    let kmi = crate::assets::list_supported_kmi();
-                    for kmi in &kmi {
-                        println!("{kmi}");
-                    }
-                    Ok(())
-                }
-                BootInfo::IsAbDevice => {
-                    let val = crate::utils::getprop("ro.build.ab_update")
-                        .unwrap_or_else(|| String::from("false"));
-                    let is_ab = val.trim().to_lowercase() == "true";
-                    println!("{}", if is_ab { "true" } else { "false" });
-                    Ok(())
-                }
-                BootInfo::DefaultPartition => {
-                    let kmi =
-                        crate::boot_patch::get_current_kmi().unwrap_or_else(|_| String::new());
-                    let name = crate::boot_patch::choose_boot_partition(&kmi, false, &None);
-                    println!("{name}");
-                    Ok(())
-                }
-                BootInfo::SlotSuffix { ota } => {
-                    let suffix = crate::boot_patch::get_slot_suffix(ota);
-                    println!("{suffix}");
-                    Ok(())
-                }
-                BootInfo::AvailablePartitions => {
-                    let parts = crate::boot_patch::list_available_partitions();
-                    for p in &parts {
-                        println!("{p}");
-                    }
-                    Ok(())
-                }
-            };
-        }
+        Commands::BootInfo { command } => return run_boot_info(&command),
         Commands::BootRestore(boot_restore) => crate::boot_patch::restore(boot_restore),
         Commands::BootPatchV2(patch) => crate::lkm_image::patch_boot(&patch),
         Commands::Resetprop { args } => {
+            // 复用 resetprop 的 argv 约定：程序名固定放在下标 0。
             let mut full_args = vec!["resetprop".to_string()];
             full_args.extend(args);
             crate::resetprop::resetprop_main(&full_args)
@@ -895,4 +716,226 @@ pub fn run() -> Result<()> {
         log::error!("{e:?}");
     }
     result
+}
+
+/// 处理 `ksud module ...` 子命令；调用方已切换到 init 挂载命名空间。
+fn run_module_command(command: Module) -> Result<()> {
+    match command {
+        Module::Install { zip } => module::install_module(&zip),
+        Module::UndoUninstall { id } => module::undo_uninstall_module(&id),
+        Module::Uninstall { id } => module::uninstall_module(&id),
+        Module::Enable { id } => module::enable_module(&id),
+        Module::Disable { id } => module::disable_module(&id),
+        Module::Action { id } => module::run_action(&id),
+        Module::List => module::list_modules(),
+        Module::Preinit { command } => match command {
+            PreinitCmd::Status => {
+                crate::preinit::print_status();
+                Ok(())
+            }
+            PreinitCmd::Reset => crate::preinit::reset_bootcount(),
+        },
+        Module::Integrity { command } => match command {
+            IntegrityStatus::Enable => {
+                enable_integrity()?;
+                println!("Module signature verification enabled");
+                Ok(())
+            }
+            IntegrityStatus::Disable => {
+                disable_integrity()?;
+                println!("Module signature verification disabled");
+                Ok(())
+            }
+        },
+        Module::Config { internal, command } => run_module_config_command(internal, command),
+    }
+}
+
+/// 把 `--temp` 映射为配置层；未指定时写入持久配置。
+const fn config_type(temp: bool) -> module_config::ConfigType {
+    if temp {
+        module_config::ConfigType::Temp
+    } else {
+        module_config::ConfigType::Persist
+    }
+}
+
+/// 分发 `ksud module config ...`，解析模块 id 后读写对应配置层。
+///
+/// `internal` 为 ksud 自带伪模块名；为 `None` 时从模块脚本注入的 `KSU_MODULE`
+/// 环境变量取 id。id 非法、环境变量缺失、读写配置文件失败均返回错误。
+fn run_module_config_command(internal: Option<String>, command: ModuleConfigCmd) -> Result<()> {
+    // 模块脚本的环境变量中带有 `KSU_MODULE`；
+    // `--internal` 用于 ksud 自有的伪模块。
+    let module_id = match internal {
+        Some(internal_name) => format!("internal.{internal_name}"),
+        None => std::env::var("KSU_MODULE").map_err(|_| {
+            anyhow::anyhow!(
+                "This command must be run in the context of a module or passed --internal <name>"
+            )
+        })?,
+    };
+    module::validate_module_id(&module_id)?;
+
+    match command {
+        ModuleConfigCmd::Get { key } => {
+            // 使用 merge_configs 以遵循优先级（temp 覆盖 persist）
+            let config = module_config::merge_configs(&module_id)?;
+            match config.get(&key) {
+                Some(value) => {
+                    println!("{value}");
+                    Ok(())
+                }
+                None => anyhow::bail!("Key '{key}' not found"),
+            }
+        }
+        ModuleConfigCmd::Set {
+            key,
+            value,
+            stdin,
+            temp,
+        } => {
+            // 在 CLI 层校验 key，以便提供更好的用户体验
+            module_config::validate_config_key(&key)?;
+
+            // 从 stdin 或参数读取值
+            let value = match value {
+                Some(value) if !stdin => value,
+                _ => {
+                    use std::io::Read;
+                    let mut buffer = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut buffer)
+                        .context("Failed to read from stdin")?;
+                    buffer
+                }
+            };
+
+            // 校验值
+            module_config::validate_config_value(&value)?;
+
+            module_config::set_config_value(&module_id, &key, &value, config_type(temp))
+        }
+        ModuleConfigCmd::List => {
+            let config = module_config::merge_configs(&module_id)?;
+            if config.is_empty() {
+                println!("No config entries found");
+            } else {
+                for (key, value) in config {
+                    println!("{key}={value}");
+                }
+            }
+            Ok(())
+        }
+        ModuleConfigCmd::Delete { key, temp } => {
+            module_config::delete_config_value(&module_id, &key, config_type(temp))
+        }
+        ModuleConfigCmd::Clear { temp } => {
+            module_config::clear_config(&module_id, config_type(temp))
+        }
+    }
+}
+
+/// 分发 `ksud debug ...` 子命令，输出格式供开发者手工排查使用。
+///
+/// 依赖内核调试接口或文件系统；对应能力缺失（例如未启用 CONFIG_KSU_DEBUG）
+/// 时会把底层错误原样返回。
+fn run_debug_command(command: Debug) -> Result<()> {
+    match command {
+        Debug::SetManager { apk } => debug::set_manager(&apk),
+        Debug::GetSign { apk } => {
+            // 返回值为 (证书字节长度, 证书 SHA-256)；哈希针对证书而非 APK 文件。
+            let signature = apk_sign::get_apk_signature(&apk)?;
+            println!("size: {:#x}, hash: {}", signature.0, signature.1);
+            Ok(())
+        }
+        Debug::Version => {
+            println!("Kernel Version: {}", ksucalls::get_version());
+            Ok(())
+        }
+        Debug::Su { global_mnt } => crate::su::grant_root(global_mnt),
+        Debug::Test => assets::ensure_binaries(false),
+        Debug::ExtractBinary { name, path } => {
+            let data = assets::get_asset_data(&name)?;
+            utils::ensure_binary(&path, &data, false)
+        }
+        Debug::Mark { command } => match command {
+            MarkCommand::Get { pid } => debug::mark_get(pid),
+            MarkCommand::Mark { pid } => debug::mark_set(pid),
+            MarkCommand::Unmark { pid } => debug::mark_unset(pid),
+            MarkCommand::Refresh => debug::mark_refresh(),
+        },
+        Debug::Sulogd => sulog::ensure_sulogd_running(),
+        Debug::Info => {
+            // info 来自内核 supercall；flags/features 是位掩码，需结合 UAPI 常量解读。
+            let info = ksucalls::get_info();
+            println!("version: {}", info.version);
+            println!("flags: 0x{:x}", info.flags);
+            println!("uapi_version: {}", info.uapi_version);
+            println!("features: 0x{:x}", info.features);
+            println!("lkm: {}", ksucalls::is_lkm());
+            println!(
+                "bundled: {}",
+                (info.flags & ksu_uapi::KSU_GET_INFO_FLAG_BUNDLED) != 0
+            );
+            println!("late_load: {}", ksucalls::is_late_load());
+            println!("runtime_mode: {}", ksucalls::runtime_mode());
+            println!(
+                "pr_build: {}",
+                (info.flags & ksu_uapi::KSU_GET_INFO_FLAG_PR_BUILD) != 0
+            );
+            Ok(())
+        }
+        Debug::Package => {
+            println!("{}", defs::DEFAULT_PACKAGE_NAME);
+            Ok(())
+        }
+    }
+}
+
+/// 分发 `ksud boot-info ...`，只向 stdout 输出供脚本解析的纯文本结果。
+///
+/// 读取 boot 镜像/属性失败时返回错误；调用方不应在此之前向 stdout 写日志，
+/// 否则会污染 Manager 与安装脚本的解析结果。
+fn run_boot_info(command: &BootInfo) -> Result<()> {
+    match command {
+        BootInfo::CurrentKmi => {
+            let kmi = crate::boot_patch::get_current_kmi()?;
+            println!("{kmi}");
+            Ok(())
+        }
+        BootInfo::SupportedKmis => {
+            let supported = crate::assets::list_supported_kmi();
+            for kmi in &supported {
+                println!("{kmi}");
+            }
+            Ok(())
+        }
+        BootInfo::IsAbDevice => {
+            // 某些设备缺少该属性，缺失时按非 A/B 处理，保持输出可解析。
+            let ab_update = crate::utils::getprop("ro.build.ab_update")
+                .unwrap_or_else(|| String::from("false"));
+            let is_ab = ab_update.trim().to_lowercase() == "true";
+            println!("{}", if is_ab { "true" } else { "false" });
+            Ok(())
+        }
+        BootInfo::DefaultPartition => {
+            let kmi = crate::boot_patch::get_current_kmi().unwrap_or_else(|_| String::new());
+            let name = crate::boot_patch::choose_boot_partition(&kmi, false, &None);
+            println!("{name}");
+            Ok(())
+        }
+        BootInfo::SlotSuffix { ota } => {
+            let suffix = crate::boot_patch::get_slot_suffix(*ota);
+            println!("{suffix}");
+            Ok(())
+        }
+        BootInfo::AvailablePartitions => {
+            let partitions = crate::boot_patch::list_available_partitions();
+            for partition in &partitions {
+                println!("{partition}");
+            }
+            Ok(())
+        }
+    }
 }

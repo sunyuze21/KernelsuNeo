@@ -23,6 +23,9 @@
 // init treats as fatal for anything in modules.load / modules.load.recovery
 // that is not in modules.blocklist. Picking safe names is up to the user.
 
+// 用户通过 `block_modules=name1,name2,...` 传入的模块名列表，分号/逗号分隔
+// 形式由内核 module param 解析器处理。使用静态缓冲区是因为该参数可能在
+// slab 分配器可用之前被解析；最大 256 字节，超长会被截断而非报错。
 static char block_modules[256];
 
 // The param may be parsed before the slab allocator is up (built-in), so copy
@@ -39,11 +42,15 @@ static int block_modules_param_set(const char *val, const struct kernel_param *k
     return 0;
 }
 
+// `block_modules` 参数的解析操作集。仅实现 set，空值（裸参数）直接接受；
+// get 未实现，因此该参数不可读回。
 static const struct kernel_param_ops block_modules_param_ops = {
     // A bare `block_modules` would otherwise fail parse_args() and the load
     .flags = KERNEL_PARAM_OPS_FL_NOARG,
     .set = block_modules_param_set,
 };
+// 注册 `block_modules` 模块参数。权限 0 表示不出现在 sysfs，只允许
+// boot-patch / cmdline 在加载时传入一次。
 module_param_cb(block_modules, &block_modules_param_ops, NULL, 0);
 
 // Merge the configured names into the kernel's native module_blacklist.

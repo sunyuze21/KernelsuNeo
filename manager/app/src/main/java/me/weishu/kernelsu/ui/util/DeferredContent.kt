@@ -18,12 +18,17 @@ import top.yukonga.miuix.kmp.nav.core.LocalNavTransitionScope
  *
  * The value is sticky — once true it never reverts to false,
  * so content stays visible during exit transitions.
+ *
+ * 说明：用于把重内容推迟到转场动画结束后再组合，避免动画掉帧；
+ * 返回值一旦变为 true 就不会回退，保证退出动画期间内容不会突然消失。
  */
 @Composable
 fun rememberContentReady(): Boolean {
+    // 导航转场是否仍在进行。
     val transitionRunning = LocalNavTransitionScope.current.isRunning
     val ready = remember { mutableStateOf(false) }
 
+    // 转场结束且尚未就绪时，再等一帧让布局稳定后放行。
     LaunchedEffect(transitionRunning) {
         if (!transitionRunning && !ready.value) {
             withFrameNanos { }

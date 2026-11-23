@@ -16,14 +16,19 @@ use crate::defs;
 use crate::utils::ensure_dir_exists;
 
 #[allow(clippy::unreadable_literal)]
+/// 配置文件魔数，按小端解码后对应 ASCII "KSUM"，用于拒绝非本格式的文件。
 const MODULE_CONFIG_MAGIC: u32 = 0x4b53554d; // "KSUM"
+/// 配置文件格式版本；读取到不匹配的版本会直接拒绝，避免按错误的布局解析新文件。
 const MODULE_CONFIG_VERSION: u32 = 1;
 
 // 校验上限
 // 读写两端都会强制执行这些上限，避免损坏或恶意的文件让我们分配任意大的内存，
 // 或生成其他工具无法解析的文件。
+/// 配置键的最大字节数，防止损坏或恶意文件诱导超大分配。
 pub const MAX_CONFIG_KEY_LEN: usize = 256;
+/// 单个配置值的最大字节数（1 MiB）。
 pub const MAX_CONFIG_VALUE_LEN: usize = 1024 * 1024; // 1MB
+/// 单个模块每个配置层允许的最大条目数。
 pub const MAX_CONFIG_COUNT: usize = 32;
 
 /// 操作针对两个配置文件中的哪一个。
@@ -31,11 +36,14 @@ pub const MAX_CONFIG_COUNT: usize = 32;
 /// `Temp` 的值只对本次开机有效，合并时会覆盖 `Persist`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigType {
+    /// 跨重启保留的配置层（persist.config），是合并时的基底。
     Persist,
+    /// 仅本次开机有效的配置层（tmp.config）；开机流程会删除它，合并时覆盖 Persist 的同名键。
     Temp,
 }
 
 impl ConfigType {
+    /// 返回该层对应的磁盘文件名，供 `config_path` 定位实际文件。
     const fn filename(self) -> &'static str {
         match self {
             Self::Persist => defs::PERSIST_CONFIG_NAME,
@@ -111,18 +119,20 @@ fn validate_config_count(config: &HashMap<String, String>) -> Result<()> {
 /// 获取模块的配置目录路径
 ///
 /// `module_id` 会被拼进路径，调用方必须先校验它。
-fn get_config_dir(module_id: &str) -> PathBuf {
+fn config_dir(module_id: &str) -> PathBuf {
     Path::new(defs::MODULE_CONFIG_DIR).join(module_id)
 }
 
-/// 获取模块的配置文件路径
-fn get_config_path(module_id: &str, config_type: ConfigType) -> PathBuf {
-    get_config_dir(module_id).join(config_type.filename())
+/// 获取模块的配置文件路径。
+///
+/// `module_id` 会直接拼进路径，调用方必须先通过 `validate_module_id` 校验，防止路径逃逸。
+fn config_path(module_id: &str, config_type: ConfigType) -> PathBuf {
+    config_dir(module_id).join(config_type.filename())
 }
 
 /// 确保配置目录存在
 fn ensure_config_dir(module_id: &str) -> Result<PathBuf> {
-    let dir = get_config_dir(module_id);
+    let dir = config_dir(module_id);
     ensure_dir_exists(&dir)?;
     Ok(dir)
 }
@@ -135,7 +145,7 @@ fn ensure_config_dir(module_id: &str) -> Result<PathBuf> {
 pub fn load_config(module_id: &str, config_type: ConfigType) -> Result<HashMap<String, String>> {
     crate::module::validate_module_id(module_id)?;
 
-    let config_path = get_config_path(module_id, config_type);
+    let config_path = config_path(module_id, config_type);
 
     if !config_path.exists() {
         debug!("Config file not found: {}", config_path.display());
@@ -248,13 +258,17 @@ pub fn save_config(
 
     ensure_config_dir(module_id)?;
 
-    let config_path = get_config_path(module_id, config_type);
+    let config_path = config_path(module_id, config_type);
     // with_extension 会替换已有的扩展名：persist.config -> persist.tmp。
-    let temp_path = config_path.with_extension("tmp");
+    let temporary_path = config_path.with_extension("tmp");
 
     // 先写入临时文件
-    let mut file = File::create(&temp_path)
-        .with_context(|| format!("Failed to create temp config file: {}", temp_path.display()))?;
+    let mut file = File::create(&temporary_path).with_context(|| {
+        format!(
+            "Failed to create temp config file: {}",
+            temporary_path.display()
+        )
+    })?;
 
     // 写入 magic
     file.write_all(&MODULE_CONFIG_MAGIC.to_le_bytes())
@@ -297,10 +311,10 @@ pub fn save_config(
         .with_context(|| "Failed to sync config file")?;
 
     // 原子重命名
-    fs::rename(&temp_path, &config_path).with_context(|| {
+    fs::rename(&temporary_path, &config_path).with_context(|| {
         format!(
             "Failed to rename config file: {} -> {}",
-            temp_path.display(),
+            temporary_path.display(),
             config_path.display()
         )
     })?;
@@ -360,7 +374,7 @@ pub fn delete_config_value(module_id: &str, key: &str, config_type: ConfigType) 
 
 /// 清空所有配置值
 pub fn clear_config(module_id: &str, config_type: ConfigType) -> Result<()> {
-    let config_path = get_config_path(module_id, config_type);
+    let config_path = config_path(module_id, config_type);
 
     // 文件本来就不存在时，正是期望的最终状态，因此不算错误。
     if config_path.exists() {
@@ -404,7 +418,7 @@ pub fn merge_configs(module_id: &str) -> Result<HashMap<String, String>> {
 
 /// 获取所有模块的配置（供遍历使用）
 /// 一次性加载全部配置，尽量减少 I/O 开销
-pub fn get_all_module_configs() -> Result<HashMap<String, HashMap<String, String>>> {
+pub fn load_all_module_configs() -> Result<HashMap<String, HashMap<String, String>>> {
     let config_root = Path::new(defs::MODULE_CONFIG_DIR);
 
     if !config_root.exists() {
@@ -490,7 +504,7 @@ pub fn clear_all_temp_configs() -> Result<()> {
 pub fn clear_module_configs(module_id: &str) -> Result<()> {
     crate::module::validate_module_id(module_id)?;
 
-    let config_dir = get_config_dir(module_id);
+    let config_dir = config_dir(module_id);
 
     // 卸载会同时丢弃两层配置；模块以后重新安装时从干净状态开始。
     if config_dir.exists() {

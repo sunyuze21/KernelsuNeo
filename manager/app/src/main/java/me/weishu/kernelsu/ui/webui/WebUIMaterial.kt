@@ -16,6 +16,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import me.weishu.kernelsu.R
 
+/**
+ * Material 风格下处理 WebUI 的 JS 对话框与文件选择事件。
+ *
+ * 所有结果都必须回传给 WebView 的 JsResult/ValueCallback，否则页面会一直
+ * 阻塞在 alert/confirm/prompt 或文件选择上。
+ */
 @Composable
 fun HandleWebUIEventMaterial(
     webUIState: WebUIState,
@@ -126,6 +132,7 @@ fun HandleWebUIEventMaterial(
         }
 
         is WebUIEvent.ShowFileChooser -> {
+            // 启动系统文件选择器；失败时回调 null，让 JS 的 input 事件结束。
             LaunchedEffect(event) {
                 try {
                     fileLauncher.launch(event.intent)

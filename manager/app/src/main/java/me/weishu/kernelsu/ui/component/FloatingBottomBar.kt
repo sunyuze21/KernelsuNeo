@@ -91,8 +91,10 @@ import kotlin.math.roundToInt
 import kotlin.math.sign
 import kotlin.math.sin
 
+// 当前按下时给 tab 内容的缩放倍率提供函数；由悬停/按压进度驱动，避免动画值下传导致整棵树重组
 val LocalFloatingBottomBarTabScale = staticCompositionLocalOf { { 1f } }
 
+// 悬浮导航条的镜面高光：双峰 BloomStroke 让边缘呈现液态玻璃的反光
 private val iosIndicatorSpecular: Highlight = Highlight(
     width = 1.dp,
     alpha = 1f,
@@ -114,9 +116,14 @@ private val iosIndicatorSpecular: Highlight = Highlight(
 )
 
 // Mirrors miuix-blur HighlightStyle's LIGHT_REF — keep in sync.
+// 光源基准坐标，需与 miuix 高光实现保持一致，否则折射与高光会错位
+/** 光源在归一化坐标中的 x 基准。 */
 private const val LIGHT_REF_X = 0.5f
+/** 光源在归一化坐标中的 y 基准。 */
 private const val LIGHT_REF_Y = 0.7f
+// 重力方向变化阈值（平方值）：小于该值视为平放，避免手抖导致高光来回抖动
 private const val GRAVITY_DIR_THRESHOLD_SQ = 0.01f // |g_xy| > 0.1, ≈ 6° tilt
+// 角度量化步长，量化后再更新可减少高光频繁重组
 private const val GRAVITY_ANGLE_STEP_RAD = (3.0 * PI / 180.0).toFloat()
 
 /** Tracks gravity for a `dualPeak` highlight's primary light, with an extra UV-clockwise offset on top. */
@@ -128,6 +135,7 @@ private fun rememberQuantizedGravityAngle(): State<Float> {
             val tilt = tiltState.value
             val magnitudeSquared = tilt.gravityX * tilt.gravityX + tilt.gravityY * tilt.gravityY
             if (magnitudeSquared > GRAVITY_DIR_THRESHOLD_SQ) {
+                // 量化到固定步长，减少角度微小变化引起的重组
                 (atan2(tilt.gravityY, tilt.gravityX) / GRAVITY_ANGLE_STEP_RAD).roundToInt() * GRAVITY_ANGLE_STEP_RAD
             } else {
                 (-PI / 2).toFloat()
@@ -136,6 +144,10 @@ private fun rememberQuantizedGravityAngle(): State<Float> {
     }
 }
 
+/**
+ * 把基础高光的主光源旋转到重力方向，并叠加 [extraDegrees] 偏移。
+ * 返回 State 以便在绘制阶段读取，避免频繁触发组合重组。
+ */
 @Composable
 private fun rememberGravityRotatedHighlight(
     base: Highlight,
@@ -162,6 +174,10 @@ private fun rememberGravityRotatedHighlight(
     }
 }
 
+/**
+ * 悬浮导航条中的单个 Tab。语义上暴露为 Tab 角色并支持回车/空格激活，
+ * 缩放通过 LocalFloatingBottomBarTabScale 在 graphicsLayer 中读取，避免组合重组。
+ */
 @Composable
 fun RowScope.FloatingBottomBarItem(
     selected: Boolean,
@@ -181,6 +197,7 @@ fun RowScope.FloatingBottomBarItem(
                 }
             }
             .onKeyEvent { event ->
+                // 回车/空格视为激活；只在抬起时触发一次，避免按下+抬起重复回调
                 val activationKey = event.key == Key.Enter ||
                         event.key == Key.NumPadEnter || event.key == Key.Spacebar
                 if (activationKey) {
@@ -192,6 +209,7 @@ fun RowScope.FloatingBottomBarItem(
             .fillMaxHeight()
             .weight(1f)
             .graphicsLayer {
+                // 在绘制阶段取值，缩放变化不会触发组合重组
                 val scale = scale()
                 scaleX = scale
                 scaleY = scale
@@ -202,6 +220,13 @@ fun RowScope.FloatingBottomBarItem(
     )
 }
 
+/**
+ * 液态玻璃风格的悬浮底部导航条。
+ *
+ * 交互上支持点击与横向拖拽切换 Tab：拖拽时指示块跟手，松手后回弹到目标 Tab。
+ * [tabsCount] 必须与 [content] 实际渲染的 Tab 数一致，否则宽度均分和索引换算会错位。
+ * [backdrop] 由外部提供，失焦/重建时需保证其生命周期覆盖本组件。
+ */
 @Composable
 fun FloatingBottomBar(
     modifier: Modifier = Modifier,
@@ -213,22 +238,28 @@ fun FloatingBottomBar(
     content: @Composable RowScope.((Int) -> Unit) -> Unit
 ) {
     val isInDark = isInDarkTheme()
+    // 胶囊形状固定为圆形裁切，拖动/缩放时保持同一形状，避免重建 Shape
     val pillShape = remember { CircleShape }
     val accentColor = MiuixTheme.colorScheme.primary
     val tabContentColor = MiuixTheme.colorScheme.onSurface
     val surfaceContainer = MiuixTheme.colorScheme.surfaceContainer
+    // 开启模糊时底色半透明，让背景透过玻璃；关闭时用实色保证可读性
     val containerColor = if (isBlurEnabled) surfaceContainer.copy(0.4f) else surfaceContainer
 
+    // 子标签层的背景捕获，用于选中块只对导航条内容做折射
     val tabsBackdrop = rememberLayerBackdrop()
     val density = LocalDensity.current
     val isLtr = LocalLayoutDirection.current == LayoutDirection.Ltr
     val animationScope = rememberCoroutineScope()
 
+    // 单个 Tab 宽度与整体宽度，均来自测量结果，供索引换算与跟手动画使用
     var tabWidthPx by remember { mutableFloatStateOf(0f) }
     var totalWidthPx by remember { mutableFloatStateOf(0f) }
 
+    // 拖动时整体的橡皮筋位移，松手归零
     val offsetAnimation = remember { Animatable(0f) }
     val rubberBandPx = with(density) { 4.dp.toPx() }
+    // 把拖动位移换算成边缘阻尼位移：越往边界越难拖，且带缓出曲线
     val panelOffset by remember(rubberBandPx) {
         derivedStateOf {
             if (totalWidthPx == 0f) {
@@ -240,9 +271,12 @@ fun FloatingBottomBar(
         }
     }
 
+    // 当前选中索引，拖动过程中与外部 selectedIndex 解耦，松手才回传
     var currentIndex by remember { mutableIntStateOf(selectedIndex) }
+    // 用最新回调避免长生命周期动画闭包持有旧 lambda
     val onSelectedUpdated by rememberUpdatedState(onSelected)
 
+    // 把触摸 x 坐标换算成 Tab 索引；RTL 下需先镜像坐标
     fun indexAt(positionX: Float): Int {
         if (tabWidthPx == 0f) return currentIndex
         val horizontalPaddingPx = with(density) { 4.dp.toPx() }
@@ -252,6 +286,7 @@ fun FloatingBottomBar(
             .coerceIn(0, tabsCount - 1)
     }
 
+    // 带阻尼的拖动动画状态机：统一处理跟手、松手吸附、取消回位
     val dampedDragAnimation = remember(animationScope, tabsCount, density, isLtr) {
         DampedDragAnimation(
             animationScope = animationScope,
@@ -267,6 +302,7 @@ fun FloatingBottomBar(
                 updateValue(indexAt(position.x).toFloat())
             },
             onDragStopped = {
+                // 松手吸附到最近 Tab；仅在索引变化时回调，避免重复导航
                 val targetIndex = targetValue.roundToInt().coerceIn(0, tabsCount - 1)
                 if (currentIndex != targetIndex) {
                     currentIndex = targetIndex
@@ -278,6 +314,7 @@ fun FloatingBottomBar(
                 }
             },
             onDragCancelled = {
+                // 手势被系统取消时回到原选中项
                 updateValue(currentIndex.toFloat())
                 animationScope.launch {
                     offsetAnimation.animateTo(0f, spring(1f, 300f, 0.5f))
@@ -285,6 +322,7 @@ fun FloatingBottomBar(
             },
             onDrag = { _, dragAmount ->
                 if (tabWidthPx > 0f && dragAmount.x != 0f) {
+                    // RTL 下拖动方向需要取反，索引才与视觉方向一致
                     updateValue(
                         (targetValue + dragAmount.x / tabWidthPx * if (isLtr) 1f else -1f)
                             .coerceIn(0f, (tabsCount - 1).toFloat()),
@@ -297,6 +335,7 @@ fun FloatingBottomBar(
         )
     }
 
+    // 外部选中项变化时同步内部索引与动画位置（例如通过返回栈恢复）
     LaunchedEffect(selectedIndex) {
         if (currentIndex != selectedIndex) {
             currentIndex = selectedIndex
@@ -304,6 +343,7 @@ fun FloatingBottomBar(
         }
     }
 
+    // 点击 Tab 的统一入口，越界索引直接忽略，防止内容层传错值导致崩溃
     fun activateTab(index: Int) {
         if (index !in 0 until tabsCount) return
         if (currentIndex != index) {
@@ -313,6 +353,7 @@ fun FloatingBottomBar(
         dampedDragAnimation.animateToValue(index.toFloat())
     }
 
+    // 选中块下方的按压高光，位置随拖动值实时跟随
     val interactiveHighlight = remember(animationScope, tabWidthPx, dampedDragAnimation) {
         InteractiveHighlight(
             animationScope = animationScope,
@@ -326,9 +367,11 @@ fun FloatingBottomBar(
         )
     }
 
+    // 两条高光角度不同：底板高光与选中胶囊高光各自贴合边缘
     val baseHighlight = rememberGravityRotatedHighlight(iosIndicatorSpecular, extraDegrees = -45f)
     val pillHighlight = rememberGravityRotatedHighlight(iosIndicatorSpecular, extraDegrees = 90f)
 
+    // 合并外部背景与标签层，使选中胶囊能同时折射页面与导航条内容
     val combinedBackdrop = rememberCombinedBackdrop(backdrop, tabsBackdrop)
 
     Box(
@@ -337,12 +380,14 @@ fun FloatingBottomBar(
     ) {
         Row(
             Modifier
+                // 测量总宽与单 Tab 宽：layout 结果直接决定索引换算和指示块位置
                 .onGloballyPositioned { coords ->
                     totalWidthPx = coords.size.width.toFloat()
                     val contentWidthPx = totalWidthPx - with(density) { 8.dp.toPx() }
                     tabWidthPx = (contentWidthPx / tabsCount).coerceAtLeast(0f)
                 }
                 .selectableGroup()
+                // 整个底板随拖动做阻尼位移，选中块也会同步偏移
                 .graphicsLayer { translationX = panelOffset }
                 .dropShadow(
                     shape = pillShape,
@@ -354,6 +399,7 @@ fun FloatingBottomBar(
                 )
                 .then(
                     if (isBlurEnabled) {
+                        // 液态玻璃底板：背景折射 + 镜面高光，按下时轻微放大
                         Modifier.drawBackdrop(
                             backdrop = backdrop,
                             shape = { pillShape },
@@ -368,6 +414,7 @@ fun FloatingBottomBar(
                             },
                             highlight = { baseHighlight.value.copy(alpha = 0.75f) },
                             layerBlock = {
+                                // 按下时按宽度换算出小幅放大，避免小屏上放大过头
                                 val width = size.width.coerceAtLeast(1f)
                                 val s = lerp(1f, 1f + 16.dp.toPx() / width, dampedDragAnimation.pressProgress)
                                 scaleX = s
@@ -381,6 +428,7 @@ fun FloatingBottomBar(
                 )
                 .then(
                     if (isBlurEnabled) {
+                        // 交互高光只在模糊模式下有意义，实色模式跳过以减少绘制开销
                         interactiveHighlight.modifier.then(interactiveHighlight.gestureModifier)
                     } else Modifier
                 )
@@ -395,8 +443,10 @@ fun FloatingBottomBar(
         }
 
         if (isBlurEnabled) {
+            // 隐藏的“捕获层”：仅用于把标签内容绘制到 tabsBackdrop，不参与语义与可见性
             CompositionLocalProvider(
                 LocalFloatingBottomBarTabScale provides {
+                    // 按下进度驱动选中标签放大，绘制阶段读取避免重组
                     lerp(1f, 1.2f, dampedDragAnimation.pressProgress)
                 },
                 LocalContentColor provides accentColor,
@@ -430,8 +480,10 @@ fun FloatingBottomBar(
         }
 
         if (tabWidthPx > 0f) {
+            // 宽度测量完成后再放指示块，否则无法计算单 Tab 宽度
             val tabWidthDp = with(density) { tabWidthPx.toDp() }
             if (isBlurEnabled) {
+                // 选中胶囊：跟随拖动值移动，带折射、镜面高光与按下内阴影
                 Box(
                     Modifier
                         .padding(horizontal = 4.dp)
@@ -443,6 +495,7 @@ fun FloatingBottomBar(
                             backdrop = combinedBackdrop,
                             shape = { pillShape },
                             effects = {
+                                // 按压力度映射为折射强度，形成“按压玻璃”的反馈
                                 val progress = dampedDragAnimation.pressProgress
                                 lens(
                                     refractionHeight = 10.dp.toPx() * progress,
@@ -455,11 +508,13 @@ fun FloatingBottomBar(
                             layerBlock = {
                                 scaleX = dampedDragAnimation.scaleX
                                 scaleY = dampedDragAnimation.scaleY
+                                // 用速度做拉伸变形，模拟橡皮筋惯性
                                 val velocity = dampedDragAnimation.velocity / 10f
                                 scaleX /= 1f - (velocity * 0.75f).fastCoerceIn(-0.2f, 0.2f)
                                 scaleY *= 1f - (velocity * 0.25f).fastCoerceIn(-0.2f, 0.2f)
                             },
                             onDrawSurface = {
+                                // 未按下时铺一层低对比底色，按下后转为更深的按压色
                                 val progress = dampedDragAnimation.pressProgress
                                 drawRect(
                                     color = if (!isInDark) Color.Black.copy(alpha = 0.1f) else Color.White.copy(alpha = 0.1f),
@@ -479,6 +534,7 @@ fun FloatingBottomBar(
                         .width(tabWidthDp)
                 )
             } else {
+                // 实色模式：简化指示块，仅保留位移与浅色底
                 Box(
                     Modifier
                         .padding(horizontal = 4.dp)
@@ -493,6 +549,7 @@ fun FloatingBottomBar(
                     contentAlignment = Alignment.CenterStart,
                 ) {
                     CompositionLocalProvider(LocalContentColor provides accentColor) {
+                        // 用整条宽度的 Row 反向位移，使选中色内容与指示块对齐
                         Row(
                             Modifier
                                 .clearAndSetSemantics {}

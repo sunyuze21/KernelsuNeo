@@ -88,6 +88,10 @@ import top.yukonga.miuix.kmp.utils.PressFeedbackType
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
+/**
+ * 首页的 Miuix 布局。
+ * 与 Material 版本共享同一份 [HomeUiState] 与 [HomeActions]，仅视觉与交互组件不同。
+ */
 @Composable
 fun HomePagerMiuix(
     state: HomeUiState,
@@ -95,6 +99,7 @@ fun HomePagerMiuix(
     bottomInnerPadding: Dp,
 ) {
     val scrollBehavior = MiuixScrollBehavior()
+    // 模糊背景依赖运行时着色器；不支持时 backdrop 为空，顶栏退化为纯色。
     val enableBlur = LocalEnableBlur.current
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
@@ -127,9 +132,11 @@ fun HomePagerMiuix(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
+                        // 用户可以关闭更新检查，关闭后不再展示更新卡片。
                         if (state.checkUpdateEnabled) {
                             UpdateCard(state = state, actions = actions)
                         }
+                        // 告警按风险优先级排列：PR 构建 > GKI 弃用 > 版本不兼容。
                         if (state.showManagerPrBuildWarning) {
                             WarningCard(stringResource(id = R.string.home_pr_build_warning), level = WarningLevel.Notice)
                         } else if (state.showKernelPrBuildWarning) {
@@ -138,6 +145,7 @@ fun HomePagerMiuix(
                         if (state.showGkiWarning) {
                             WarningCard(stringResource(id = R.string.home_gki_warning), level = WarningLevel.Notice)
                         }
+                        // 只有可安全刷写内核时才把“需要新内核”变成可点击的安装入口。
                         if (state.requiresNewKernel) {
                             WarningCard(
                                 stringResource(
@@ -177,6 +185,7 @@ fun HomePagerMiuix(
                         )
                         Spacer(
                             Modifier.height(
+                                // 非完整功能构建没有底部导航栏，需额外补上导航栏高度。
                                 bottomInnerPadding + if (!Natives.isFullFeatured())
                                     WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp
                             )
@@ -188,6 +197,10 @@ fun HomePagerMiuix(
     }
 }
 
+/**
+ * 更新提示卡片：仅当远端版本号高于当前管理器版本时可见。
+ * 有更新日志时先弹确认框，否则直接打开下载链接。
+ */
 @Composable
 private fun UpdateCard(
     state: HomeUiState,
@@ -222,6 +235,7 @@ private fun UpdateCard(
     }
 }
 
+/** 首页顶栏：在支持模糊时叠加 backdrop，不支持的设备使用纯色背景。 */
 @Composable
 private fun TopBar(
     scrollBehavior: ScrollBehavior,
@@ -240,6 +254,10 @@ private fun TopBar(
     }
 }
 
+/**
+ * 核心状态卡片：按“已激活 / 可安装 / 不支持”三种情况切换布局。
+ * Miuix 版本使用整块彩色卡片，并在激活时展示工作模式角标。
+ */
 @Composable
 private fun StatusCard(
     state: HomeUiState,
@@ -248,6 +266,7 @@ private fun StatusCard(
     Column {
         when {
             state.ksuVersion != null -> {
+                // 安全模式与越狱模式可能同时存在，因此拼接而不是二选一。
                 val workingState = buildString {
                     if (state.isSafeMode) {
                         append(" [${stringResource(id = R.string.safe_mode)}]")
@@ -256,6 +275,7 @@ private fun StatusCard(
                         append(" [${stringResource(id = R.string.jailbreak_mode)}]")
                     }
                 }
+                // lkmMode 为 null 表示无法判断，不展示模式文字。
                 val workingMode = when (state.lkmMode) {
                     null -> null
                     true -> "LKM"
@@ -271,6 +291,7 @@ private fun StatusCard(
                 ) {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
+                        // 动态取色时使用主题色，否则用固定绿色以保证激活状态的辨识度。
                         colors = CardDefaults.defaultColors(
                             color = when {
                                 isDynamicColor -> colorScheme.secondaryContainer
@@ -279,6 +300,7 @@ private fun StatusCard(
                             }
                         ),
                         onClick = {
+                            // late-load 模式下无法直接刷写内核，禁用点击反馈。
                             if (!state.isLateLoadMode) {
                                 actions.onInstallClick()
                             }
@@ -373,6 +395,7 @@ private fun StatusCard(
                     Card(
                         modifier = Modifier.weight(1f),
                         onClick = {
+                            // late-load 模式下无法直接刷写内核，禁用点击反馈。
                             if (!state.isLateLoadMode) {
                                 actions.onInstallClick()
                             }
@@ -392,6 +415,7 @@ private fun StatusCard(
                                 )
                             },
                             endActions = {
+                                // 越狱只在 SELinux Permissive 时可用，其余情况不展示入口。
                                 if (state.isSELinuxPermissive) {
                                     TextButton(
                                         text = stringResource(R.string.home_jailbreak),
@@ -406,6 +430,7 @@ private fun StatusCard(
             }
 
             else -> {
+                // 非 GKI 内核视为不受支持，只展示原因，不提供安装入口。
                 Card(
                     onClick = {
                         if (!state.isLateLoadMode) {
@@ -433,6 +458,7 @@ private fun StatusCard(
     }
 }
 
+/** 赞助与文档链接区域，链接统一交给外部 UriHandler 打开。 */
 @Composable
 private fun SupportLinks(
     onOpenUrl: (String) -> Unit,
@@ -470,11 +496,13 @@ private fun SupportLinks(
     }
 }
 
+/** 系统信息区域：分组展示版本、设备、SELinux 与 seccomp 状态。 */
 @Composable
 private fun InfoCard(
     systemInfo: SystemInfo,
     modifier: Modifier = Modifier,
 ) {
+    // 信息行通用布局：图标 + 标题 + 内容，最后一行可去掉底部间距。
     @Composable
     fun InfoText(
         icon: ImageVector,
@@ -513,12 +541,14 @@ private fun InfoCard(
         }
     }
 
+    // 内核返回原始状态字符串，这里映射为可本地化的展示文案。
     val selinuxDisplay = when (systemInfo.selinuxStatus) {
         "Enforcing" -> stringResource(R.string.selinux_status_enforcing)
         "Permissive" -> stringResource(R.string.selinux_status_permissive)
         "Disabled" -> stringResource(R.string.selinux_status_disabled)
         else -> stringResource(R.string.selinux_status_unknown)
     }
+    // seccomp 以整数枚举返回，-1 表示内核未提供该能力。
     val seccompDisplay = when (systemInfo.seccompStatus) {
         -1 -> stringResource(R.string.seccomp_status_not_supported)
         0 -> stringResource(R.string.seccomp_status_disabled)
@@ -574,6 +604,7 @@ private fun InfoCard(
     }
 }
 
+// 预览：已激活并处于 LKM 模式的状态卡片。
 @Preview(name = "Activated")
 @Composable
 private fun StatusCardActivatedPreview() {
@@ -583,12 +614,14 @@ private fun StatusCardActivatedPreview() {
     )
 }
 
+// 预览：未激活且无法确定工作模式的状态卡片。
 @Preview(name = "Not Activated")
 @Composable
 private fun StatusCardNotActivatedPreview() {
     StatusCard(state = previewHomeScreenState(ksuVersion = null, lkmMode = null), actions = HomeActions({}, {}))
 }
 
+// 预览：SELinux 为 Permissive 时展示越狱入口。
 @Preview(name = "Permissive")
 @Composable
 private fun StatusCardPermissivePreview() {
@@ -598,6 +631,7 @@ private fun StatusCardPermissivePreview() {
     )
 }
 
+// 预览：late-load（越狱）模式下卡片不可点击安装。
 @Preview(name = "Jailbreak")
 @Composable
 private fun StatusCardJailbreakPreview() {
@@ -607,6 +641,7 @@ private fun StatusCardJailbreakPreview() {
     )
 }
 
+// 预览用系统信息，字段值仅用于占位排版，与真机无关。
 private val previewSystemInfo = SystemInfo(
     kernelVersion = "6.12.23-android16-5-g123456789000-abogki123456789-4k",
     managerVersion = "3.0.0 (30000)",
@@ -616,10 +651,13 @@ private val previewSystemInfo = SystemInfo(
     seccompStatus = 2
 )
 
+// 预览用的空 UriHandler，防止预览阶段真的打开外部链接。
 private val previewUriHandler = object : UriHandler {
+    // 预览环境没有真实浏览器上下文，空实现即可。
     override fun openUri(uri: String) {}
 }
 
+// 组合出预览所需的完整首页内容，避免每个预览重复搭建 Scaffold。
 @Composable
 private fun HomeScreenPreviewContent(
     ksuVersion: Int?,
@@ -657,30 +695,35 @@ private fun HomeScreenPreviewContent(
     }
 }
 
+// 预览：完整首页，已激活并处于 LKM 模式。
 @Preview(name = "Home Activated", showBackground = true)
 @Composable
 private fun HomeScreenActivatedPreview() {
     HomeScreenPreviewContent(ksuVersion = 12345, lkmMode = true)
 }
 
+// 预览：完整首页，内核未安装或未激活。
 @Preview(name = "Home Not Activated", showBackground = true)
 @Composable
 private fun HomeScreenNotActivatedPreview() {
     HomeScreenPreviewContent(ksuVersion = null, lkmMode = null)
 }
 
+// 预览：完整首页，SELinux Permissive 并展示越狱入口。
 @Preview(name = "Home Permissive", showBackground = true)
 @Composable
 private fun HomeScreenPermissivePreview() {
     HomeScreenPreviewContent(ksuVersion = null, lkmMode = null, selinuxStatus = "Permissive")
 }
 
+// 预览：完整首页，越狱（late-load）模式。
 @Preview(name = "Home Jailbreak", showBackground = true)
 @Composable
 private fun HomeScreenJailbreakPreview() {
     HomeScreenPreviewContent(ksuVersion = 12345, lkmMode = true, isLateLoadMode = true)
 }
 
+// 构造预览用 HomeUiState，固定版本与兼容性字段以覆盖不同展示分支。
 private fun previewHomeScreenState(
     ksuVersion: Int?,
     lkmMode: Boolean?,

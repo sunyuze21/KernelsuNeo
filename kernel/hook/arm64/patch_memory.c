@@ -82,6 +82,11 @@ fail:
 // However, it's backport to android13-5.10 but not to android12-5.10.
 // https://cs.android.com/android/_/android/kernel/common/+/6d9f07d8f1ffc310a6877153fe882f35ae380799
 // So we need to grep kernel source code to detect which one to use.
+// AArch64 上修改指令后必须让 D-cache 与 I-cache 保持一致：
+// 先按“地址到 PoC”清理数据缓存，再按“地址到 PoU”失效指令缓存。
+// KSU_NEW_DCACHE_FLUSH 由构建配置探测内核版本/厂商回移植决定，
+// 旧内核只能使用 __flush_dcache_area()/__flush_icache_range()。
+// 注意这里的 start/end 必须是内核线性映射地址，且调用时已停止其他 CPU。
 #if KSU_NEW_DCACHE_FLUSH
 #define ksu_flush_dcache(start, sz)                                                                                    \
     ({                                                                                                                 \
@@ -95,12 +100,14 @@ fail:
 #define ksu_flush_icache(start, end) __flush_icache_range(start, end)
 #endif
 
+// 传递给 stop_machine 回调的补丁上下文。生命周期只覆盖一次 ksu_patch_text()
+// 调用，由栈上变量持有，因此回调中不得保存该指针。
 struct patch_text_info {
-    void *dst;
-    void *src;
-    size_t len;
-    atomic_t cpu_count;
-    int flags;
+    void *dst;             // 目标内核虚拟地址（syscall 表项或函数入口）
+    void *src;             // 新内容的源缓冲区，长度必须等于 len
+    size_t len;            // 需要写入的字节数，跨页时由 nosync 逐段处理
+    atomic_t cpu_count;    // 已到达回调的 CPU 计数，用于选出最后一个 CPU 执行写入
+    int flags;             // KSU_PATCH_TEXT_FLUSH_* 组合，决定写入后如何维护缓存
 };
 
 // Implementation of arbitrary kernel address modification.
@@ -151,6 +158,11 @@ err:
     return ret;
 }
 
+// stop_machine 回调：每个在线 CPU 都会执行一次。
+// 用原子计数选出最后一个到达的 CPU 作为 master，由它调用
+// ksu_patch_text_nosync() 完成实际写入；其余 CPU 自旋等待计数越过阈值后
+// 执行 isb()，保证返回用户态/继续执行前已经看到新指令。
+// 返回值：master 返回写入错误码，其余 CPU 返回 0。
 static int ksu_patch_text_cb(void *arg)
 {
     struct patch_text_info *pp = arg;
@@ -174,6 +186,10 @@ static int ksu_patch_text_cb(void *arg)
     return ret;
 }
 
+// 对外入口：在 stop_machine 保护下把 len 字节从 src 复制到内核文本地址 dst。
+// 使用 cpu_online_mask 让所有在线 CPU 参与同步，避免正在执行的 CPU 命中
+// 半写入的指令或 syscall 表项。返回 0 成功，否则为负错误码（含 -ENOENT、
+// -EIO 等），失败时会打印目标地址便于定位。
 int ksu_patch_text(void *dst, void *src, size_t len, int flags)
 {
     int ret;

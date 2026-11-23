@@ -11,20 +11,27 @@
 
 #include "infra/event_queue.h"
 
+/* 队列节点：定长头 + 柔性数组负载，一次性分配，读取后整体释放。 */
 struct ksu_event_queue_node {
+    /* 挂入 queue->pending，按入队顺序。 */
     struct list_head list;
+    /* 对外暴露的记录头，seq/ts_ns 在成功入队时填写。 */
     struct ksu_event_record_hdr hdr;
+    /* 负载区，长度即 hdr.len；由 push 复制，读者不可修改。 */
     __u8 payload[];
 };
 
+/* 记录总大小 = 头 + 负载；用于容量检查与 read 返回值。 */
 static size_t ksu_event_queue_record_size(__u32 payload_len)
 {
     return sizeof(struct ksu_event_record_hdr) + payload_len;
 }
 
+/* 在持锁状态下累加一次丢弃，并扩展待上报区间；调用者必须持有 queue->lock。 */
 static void ksu_event_queue_note_drop_locked(struct ksu_event_queue *queue, __u64 seq)
 {
     queue->dropped_total++;
+    /* 区间内第一条丢弃决定 first_seq */
     if (!queue->dropped_pending) {
         queue->dropped_first_seq = seq;
     }
@@ -32,11 +39,13 @@ static void ksu_event_queue_note_drop_locked(struct ksu_event_queue *queue, __u6
     queue->dropped_last_seq = seq;
 }
 
+/* 持锁判断是否有可读内容：待上报丢弃、上报中记录或 pending 链表。 */
 static bool ksu_event_queue_has_data_locked(const struct ksu_event_queue *queue)
 {
     return queue->dropped_pending || queue->dropped_inflight || !list_empty(&queue->pending);
 }
 
+/* 置 closed 标记；使用 irqsave 以兼容中断上下文的生产者。 */
 static void ksu_event_queue_mark_closed(struct ksu_event_queue *queue)
 {
     unsigned long irq_flags;
@@ -46,6 +55,7 @@ static void ksu_event_queue_mark_closed(struct ksu_event_queue *queue)
     spin_unlock_irqrestore(&queue->lock, irq_flags);
 }
 
+/* 初始化所有字段；seq 从 1 开始，0 保留给"无记录"语义。 */
 void ksu_event_queue_init(struct ksu_event_queue *queue, __u32 max_queued, __u32 max_payload_len)
 {
     spin_lock_init(&queue->lock);
@@ -66,9 +76,11 @@ void ksu_event_queue_init(struct ksu_event_queue *queue, __u32 max_queued, __u32
     queue->closed = false;
 }
 
+/* 关闭队列并释放所有待读节点。先唤醒阻塞读者，再在 read_lock 下清空链表，
+ * 与并发 read 互斥；清空后仍保留结构体本身（无额外内存）。 */
 void ksu_event_queue_destroy(struct ksu_event_queue *queue)
 {
-    struct ksu_event_queue_node *node, *tmp;
+    struct ksu_event_queue_node *node, *tmp; /* 遍历用节点与其后继 */
     unsigned long irq_flags;
 
     ksu_event_queue_mark_closed(queue);
@@ -93,12 +105,17 @@ void ksu_event_queue_destroy(struct ksu_event_queue *queue)
     wake_up_interruptible_poll(&queue->read_wait, EPOLLHUP | POLLHUP);
 }
 
+/*
+ * 追加一条记录。分配在锁外进行（gfp 可睡眠），入队时再取锁；即使分配失败或
+ * 队列满也占用一个序号并记一次丢弃，使读者能通过序号缺口发现丢失。
+ * 返回值见头文件。
+ */
 int ksu_event_queue_push(struct ksu_event_queue *queue, __u16 type, __u16 flags, const void *payload, __u32 len,
                          gfp_t gfp)
 {
-    struct ksu_event_queue_node *node = NULL;
+    struct ksu_event_queue_node *node = NULL; /* 新节点，入队成功前归本地所有 */
     unsigned long irq_flags;
-    __u64 seq;
+    __u64 seq; /* 本次事件占用的序号，无论是否真正入队 */
     bool wake = false;
     int ret = 0;
 
@@ -117,6 +134,7 @@ int ksu_event_queue_push(struct ksu_event_queue *queue, __u16 type, __u16 flags,
         node->hdr.type = type;
         node->hdr.flags = flags;
         node->hdr.len = len;
+        /* seq/ts_ns 在持锁入队时填写，丢弃路径不会发布该节点 */
         node->hdr.ts_ns = 0;
         node->hdr.seq = 0;
 
@@ -131,6 +149,7 @@ int ksu_event_queue_push(struct ksu_event_queue *queue, __u16 type, __u16 flags,
         goto out_unlock;
     }
 
+    /* 序号在锁内分配，保证与丢弃记录顺序一致 */
     seq = queue->next_seq++;
     if (!node || (queue->max_queued && queue->queued >= queue->max_queued)) {
         ksu_event_queue_note_drop_locked(queue, seq);
@@ -148,10 +167,12 @@ int ksu_event_queue_push(struct ksu_event_queue *queue, __u16 type, __u16 flags,
 out_unlock:
     spin_unlock_irqrestore(&queue->lock, irq_flags);
 
+    /* 未入队的节点在锁外释放，避免在自旋锁内 kfree */
     if (ret && node) {
         kfree(node);
     }
 
+    /* 唤醒放在解锁后，减少读者争用 */
     if (wake) {
         wake_up_interruptible_poll(&queue->read_wait, EPOLLIN | EPOLLRDNORM);
     }
@@ -159,6 +180,7 @@ out_unlock:
     return ret;
 }
 
+/* 主动记录一次丢弃，不分配内存；关闭后静默返回。 */
 void ksu_event_queue_drop(struct ksu_event_queue *queue)
 {
     unsigned long irq_flags;
@@ -177,6 +199,8 @@ void ksu_event_queue_drop(struct ksu_event_queue *queue)
     wake_up_interruptible_poll(&queue->read_wait, EPOLLIN | EPOLLRDNORM);
 }
 
+/* 等待可读数据或关闭。返回 0 表示可继续读取，-EAGAIN 非阻塞无数据，
+ * 其余负值为被信号打断的返回值（调用方应原样上抛）。 */
 static int ksu_event_queue_wait_ready(struct ksu_event_queue *queue, int file_flags)
 {
     int ret;
@@ -194,6 +218,7 @@ static int ksu_event_queue_wait_ready(struct ksu_event_queue *queue, int file_fl
             return -EAGAIN;
         }
 
+        /* 条件在锁内重新检查，避免丢失唤醒 */
         ret = wait_event_interruptible(queue->read_wait, queue->closed || ksu_event_queue_has_data(queue));
         if (ret) {
             return ret;

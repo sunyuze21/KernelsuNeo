@@ -19,6 +19,9 @@ import me.weishu.kernelsu.data.registry.RegistryUrls
 import me.weishu.kernelsu.ui.component.markdown.MarkdownContent
 import me.weishu.kernelsu.ui.component.material.ExpressiveDialog
 
+/**
+ * Material 版加载对话框：不可点击外部或返回键关闭，避免加载过程中界面状态被破坏。
+ */
 @Composable
 fun LoadingDialogMaterial(
     showDialog: MutableState<Boolean>,
@@ -45,6 +48,10 @@ fun LoadingDialogMaterial(
     }
 }
 
+/**
+ * Material 版确认对话框。关闭时先派发回调再隐藏，保证业务能拿到取消事件；
+ * 内容按类型分派：受限/HTML 走锁定渲染，Markdown 走普通渲染，其余按纯文本显示。
+ */
 @Composable
 fun ConfirmDialogMaterial(
     visuals: ConfirmDialogVisuals,
@@ -55,6 +62,7 @@ fun ConfirmDialogMaterial(
     if (showDialog.value) {
         ExpressiveDialog(
             onDismissRequest = {
+                // 点击外部/返回视为取消
                 dismiss()
                 showDialog.value = false
             },
@@ -66,6 +74,7 @@ fun ConfirmDialogMaterial(
                     visuals.isRestricted || visuals.isHtml -> MarkdownContent(
                         content = content,
                         isMarkdown = !visuals.isHtml,
+                        // 限制基础 URL，防止注册表内容加载任意远端资源
                         restrictedBaseUrl = RegistryUrls.DEFAULT_BASE_URL,
                     )
                     visuals.isMarkdown -> MarkdownContent(content = content, isMarkdown = true)
@@ -80,6 +89,7 @@ fun ConfirmDialogMaterial(
                         showDialog.value = false
                     }
                 ) {
+                    // 自定义按钮文案优先，缺省回退到系统确定
                     Text(visuals.confirm ?: stringResource(id = android.R.string.ok))
                 }
             },

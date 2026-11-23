@@ -103,6 +103,10 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.isDynamicColor
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
+/**
+ * Miuix 主题下的 SuLog 页面：搜索框与顶栏联动，日志列表支持下拉刷新，
+ * 条目详情使用 OverlayDialog 展示可复制的字段。
+ */
 @Composable
 fun SulogScreenMiuix(
     state: SulogScreenState,
@@ -111,9 +115,11 @@ fun SulogScreenMiuix(
     val enableBlur = LocalEnableBlur.current
     val density = LocalDensity.current
     val scrollBehavior = MiuixScrollBehavior()
+    // 顶栏折叠程度决定搜索框顶部间距
     val dynamicTopPadding by remember {
         derivedStateOf { 12.dp * (1f - scrollBehavior.state.collapsedFraction) }
     }
+    // 仅在模糊可用时使用透明顶栏
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
@@ -126,9 +132,11 @@ fun SulogScreenMiuix(
         stringResource(R.string.refresh_refresh),
         stringResource(R.string.refresh_complete),
     )
+    // 搜索框展开/收起状态属于 Miuix 组件内部状态，需与 ViewModel 文本双向同步
     var searchStatus by remember { mutableStateOf(SearchStatus("")) }
     var selectedEntry by remember { mutableStateOf<SulogEntry?>(null) }
 
+    // 搜索结果为空时保持默认页，有搜索词才切到结果页
     LaunchedEffect(state.searchText, state.visibleEntries) {
         searchStatus = searchStatus.copy(
             searchText = state.searchText,
@@ -136,6 +144,7 @@ fun SulogScreenMiuix(
         )
     }
 
+    /** 搜索状态变化时同步给 ViewModel，并按文本是否为空切换结果页显示。 */
     fun onSearchStatusChange(nextStatus: SearchStatus) {
         searchStatus = nextStatus.copy(
             resultStatus = if (nextStatus.searchText.isBlank()) SearchStatus.ResultStatus.DEFAULT else SearchStatus.ResultStatus.SHOW,
@@ -194,6 +203,7 @@ fun SulogScreenMiuix(
                                     },
                                     content = {
                                         ListPopupColumn {
+                                            // 过滤器可多选，勾选状态直接反映 selectedFilters
                                             SulogEventFilter.entries.forEachIndexed { index, filter ->
                                                 DropdownImpl(
                                                     text = sulogFilterLabel(filter),
@@ -291,6 +301,7 @@ fun SulogScreenMiuix(
                     end = innerPadding.calculateEndPadding(layoutDirection),
                 ),
             ) {
+                // 搜索词、过滤条件或文件变化时回到顶部
                 val latestVisibleEntries = rememberUpdatedState(state.visibleEntries)
                 ScrollToTopOnChange(
                     listState,
@@ -298,6 +309,7 @@ fun SulogScreenMiuix(
                     state.selectedFilters,
                     state.selectedFilePath,
                 ) { latestVisibleEntries.value }
+                // 列表作为模糊层采样源，滚动时顶栏模糊随之更新
                 Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
                     LazyColumn(
                         state = listState,
@@ -359,6 +371,10 @@ fun SulogScreenMiuix(
     }
 }
 
+/**
+ * 内核特性状态横幅；supported 且未启用时提供开启按钮。
+ * 无横幅时不渲染 Row，避免其底部内边距在文件选择器上方留下空白。
+ */
 @Composable
 private fun SulogStatusSection(
     state: SulogScreenState,
@@ -421,6 +437,7 @@ private fun SulogStatusSection(
     }
 }
 
+/** 向 LazyColumn 追加日志条目；加载失败时以整屏错误卡片替代列表。 */
 private fun LazyListScope.sulogEntriesSection(
     entries: List<SulogEntry>,
     errorMessage: String?,
@@ -444,6 +461,7 @@ private fun LazyListScope.sulogEntriesSection(
     }
 }
 
+/** 单条日志卡片：标题、次要说明、时间与摘要标签，右侧显示执行结果。 */
 @Composable
 private fun SulogEntryCard(
     entry: SulogEntry,
@@ -495,6 +513,7 @@ private fun SulogEntryCard(
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    // 标签配色循环使用，数量超出时复用最后一组
                     val colors = listOf(
                         colorScheme.primary to colorScheme.onPrimary,
                         colorScheme.secondaryContainer to colorScheme.onSecondaryContainer,
@@ -532,6 +551,7 @@ private fun SulogEntryCard(
     }
 }
 
+/** Miuix 风格的空态/错误态卡片，长文本最多三行并省略。 */
 @Composable
 private fun SulogMessageCard(
     modifier: Modifier,
@@ -562,6 +582,10 @@ private fun SulogMessageCard(
     }
 }
 
+/**
+ * 日志详情弹窗。关闭动画期间 [entry] 可能先变为 null，
+ * 因此保留 lastEntry 作为过渡内容，避免弹窗文字瞬间消失。
+ */
 @Composable
 private fun SulogDetailDialog(
     show: Boolean,

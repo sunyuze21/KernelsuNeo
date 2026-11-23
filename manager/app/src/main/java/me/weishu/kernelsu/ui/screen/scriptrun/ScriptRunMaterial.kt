@@ -64,6 +64,13 @@ import me.weishu.kernelsu.ui.component.material.expressiveTopAppBarColors
 import me.weishu.kernelsu.ui.util.ShellHighlightColors
 import me.weishu.kernelsu.ui.util.rememberShellHighlight
 
+/**
+ * 脚本运行页的 Material 实现：准备中显示加载、失败显示原因，就绪后展示
+ * 脚本信息、参数表单与源码，最后是执行按钮。
+ *
+ * 参数输入全部受控于 [ScriptRunUiState]，错误文案由 ViewModel 计算，
+ * 这里只做渲染，确保 Material/Miuix 两侧校验结果一致。
+ */
 @Composable
 internal fun ScriptRunScreenMaterial(
     state: ScriptRunUiState,
@@ -75,6 +82,7 @@ internal fun ScriptRunScreenMaterial(
         topBar = { TopBar(onBack = actions.onBack, scrollBehavior = scrollBehavior) },
         contentWindowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
     ) { innerPadding ->
+        // prepared 为 null 且未失败表示仍在解析/解压脚本。
         val prepared = state.prepared
         when {
             state.phase == ScriptRunPhase.FAILED -> Column(
@@ -139,9 +147,11 @@ internal fun ScriptRunScreenMaterial(
     }
 }
 
+/** 脚本基本信息卡片：名称、ID/版本、作者、描述与最近一次运行记录。 */
 @Composable
 private fun ScriptInfo(state: ScriptRunUiState, prepared: PreparedScript, actions: ScriptRunActions) {
     val context = LocalContext.current
+    // manifest 来自已解析的脚本包，字段可能为空，展示前需判空/判空白。
     val manifest = prepared.manifest
     SegmentedColumn(
         modifier = Modifier.padding(horizontal = 16.dp),
@@ -193,6 +203,12 @@ private fun InstallAnywayCard(actions: ScriptRunActions) {
     }
 }
 
+/**
+ * 脚本参数表单。
+ *
+ * 无参数时直接返回，避免渲染空分组；Bool/Choice/Text/Integer 分别映射到
+ * 不同控件，整数键盘类型由 [integerKeyboardType] 决定（允许负数时不能只用数字键盘）。
+ */
 @Composable
 private fun ParamsForm(state: ScriptRunUiState, prepared: PreparedScript, actions: ScriptRunActions) {
     val params = prepared.params.params
@@ -202,6 +218,7 @@ private fun ParamsForm(state: ScriptRunUiState, prepared: PreparedScript, action
         title = stringResource(R.string.script_params),
         content = params.map { param ->
             {
+                // 未输入时回退到脚本声明的默认值，保证表单初始状态可执行。
                 val value = state.values[param.key] ?: param.defaultValue
                 val error = state.errors[param.key]
                 when (param) {
@@ -221,6 +238,7 @@ private fun ParamsForm(state: ScriptRunUiState, prepared: PreparedScript, action
                     )
 
                     is ScriptParam.Text, is ScriptParam.Integer -> {
+                        // 每条错误都转成对应语言的提示文本，优先于描述展示。
                         val errorText = error?.let { paramErrorText(param, it) }
                         SegmentedTextField(
                             label = param.label,
@@ -250,9 +268,16 @@ private fun ParamsForm(state: ScriptRunUiState, prepared: PreparedScript, action
     )
 }
 
+/**
+ * 可展开的脚本源码区。
+ *
+ * 源码可能很长的单行命令，因此禁用软换行并允许横向滚动，避免自动折行
+ * 破坏 shell 语法；展开状态用 rememberSaveable 保留。
+ */
 @Composable
 private fun SourceSection(prepared: PreparedScript) {
     var expanded by rememberSaveable { mutableStateOf(false) }
+    // 箭头旋转仅作为展开反馈，与内容显示状态分离。
     val rotation by animateFloatAsState(targetValue = if (expanded) 180f else 0f, label = "SourceExpand")
     SegmentedColumn(
         modifier = Modifier.padding(horizontal = 16.dp),
@@ -277,6 +302,7 @@ private fun SourceSection(prepared: PreparedScript) {
             }
             if (expanded) add {
                 SegmentedItemContainer {
+                    // 高亮颜色跟随当前 surfaceBright，保证深浅主题下的可读性。
                     val source = rememberShellHighlight(
                         prepared.actionSource,
                         ShellHighlightColors.forBackground(MaterialTheme.colorScheme.surfaceBright),
@@ -298,6 +324,7 @@ private fun SourceSection(prepared: PreparedScript) {
     )
 }
 
+/** 页面顶栏：返回按钮与标题，滚动时随内容折叠。 */
 @Composable
 private fun TopBar(
     onBack: () -> Unit,

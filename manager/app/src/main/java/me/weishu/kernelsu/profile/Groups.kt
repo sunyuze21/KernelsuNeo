@@ -1,6 +1,9 @@
 package me.weishu.kernelsu.profile
 
 /**
+ * Android 补充组（supplementary GID）列表，与 AOSP 的 android_filesystem_config.h 对齐。
+ * [gid] 会写入 [me.weishu.kernelsu.Natives.Profile.groups]；[display]/[desc] 仅用于 UI 展示。
+ *
  * https://cs.android.com/android/platform/superproject/main/+/main:system/core/libcutils/include/private/android_filesystem_config.h
  * @author weishu
  * @date 2023/6/3.

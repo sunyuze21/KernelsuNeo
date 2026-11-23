@@ -70,6 +70,9 @@ import me.weishu.kernelsu.ui.component.statustag.StatusTag
 /**
  * @author weishu
  * @date 2023/10/20.
+ *
+ * 模板列表的 Material 实现：支持下拉刷新、离线重试，以及通过顶栏菜单
+ * 导入/导出剪贴板内容。FAB 随滚动方向收起/展开，避免遮挡列表项。
  */
 
 @Composable
@@ -82,6 +85,7 @@ fun AppProfileTemplateScreenMaterial(
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
     val pullToRefreshState = rememberPullToRefreshState()
     val listState = rememberLazyListState()
+    // 100dp 滚动阈值，过滤掉列表惯性滚动中的微小抖动。
     val threshold = with(LocalDensity.current) { 100.dp.toPx() }
     val fabExpanded by remember {
         var lastIndex = 0
@@ -157,6 +161,7 @@ fun AppProfileTemplateScreenMaterial(
                 )
             },
         ) {
+            // 列表为空即视为首次加载占位；刷新中则由下拉指示器负责反馈。
             val isLoading = state.templateList.isEmpty()
 
             if (isLoading && !state.isRefreshing) {
@@ -179,6 +184,7 @@ fun AppProfileTemplateScreenMaterial(
                     }
                 }
             } else {
+                // 提前取出列表与系统栏 padding，避免在 LazyColumn 作用域内重复读取。
                 val templateList = state.templateList
                 val navBars = WindowInsets.navigationBars.asPaddingValues()
                 val captionBar = WindowInsets.captionBar.asPaddingValues()
@@ -208,6 +214,7 @@ fun AppProfileTemplateScreenMaterial(
     }
 }
 
+/** 单个模板条目：展示名称、来源、作者、描述以及 UID/GID/SELinux 上下文。 */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TemplateItem(
@@ -260,6 +267,7 @@ private fun TemplateItem(
     )
 }
 
+/** 顶栏：返回、标题与导入/导出下拉菜单；菜单状态仅为 UI 局部状态。 */
 @Composable
 private fun TopBar(
     onBack: () -> Unit,
@@ -276,6 +284,7 @@ private fun TopBar(
             TopBarBackButton(onClick = onBack)
         },
         actions = {
+            // 下拉菜单开关只影响当前顶栏，不需要提升到页面状态。
             var showDropdown by remember { mutableStateOf(false) }
             IconButton(
                 onClick = { showDropdown = true }
@@ -288,6 +297,7 @@ private fun TopBar(
                     expanded = showDropdown,
                     onDismissRequest = { showDropdown = false }
                 ) {
+                    // 统一成 (撤销文案资源, 动作) 列表，便于批量生成菜单项与形状。
                     val menuItems = listOf(
                         R.string.app_profile_import_from_clipboard to onImport,
                         R.string.app_profile_export_to_clipboard to onExport,

@@ -59,6 +59,8 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 /**
+ * Miuix 主题下的刷写页实现，日志区同样使用等宽字体并自动滚到底部。
+ *
  * @author weishu
  * @date 2023/1/1.
  */
@@ -72,6 +74,7 @@ fun FlashScreenMiuix(
 ) {
     val enableBlur = LocalEnableBlur.current
     val scrollState = rememberScrollState()
+    // 支持模糊时顶栏透明以透出背景采样，否则使用主题表面色
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
@@ -94,6 +97,7 @@ fun FlashScreenMiuix(
             )
         },
         floatingActionButton = {
+            // 仅在成功后展示圆形操作按钮，执行中显示进度圈代替图标
             if (state.flashingStatus == FlashingStatus.SUCCESS) {
                 val isRebootAction = state.showRebootAction
                 FloatingActionButton(
@@ -129,10 +133,12 @@ fun FlashScreenMiuix(
         contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal)
     ) { innerPadding ->
         val layoutDirection = LocalLayoutDirection.current
+        // 刷写期间拦截音量键，降低误入 bootloader 的风险
         KeyEventBlocker {
             it.key == Key.VolumeDown || it.key == Key.VolumeUp
         }
 
+        // 日志区作为模糊背景采样源，滚动时顶栏模糊实时更新
         Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
             Column(
                 modifier = Modifier
@@ -144,6 +150,7 @@ fun FlashScreenMiuix(
                     )
                     .verticalScroll(scrollState),
             ) {
+                // 日志追加后自动跟随到底部
                 LaunchedEffect(state.text) {
                     scrollState.animateScrollTo(scrollState.maxValue)
                 }
@@ -166,6 +173,7 @@ fun FlashScreenMiuix(
 }
 
 
+/** 刷写页顶栏；标题根据刷写状态显示进行中/成功/失败。 */
 @Composable
 private fun TopBar(
     status: FlashingStatus,

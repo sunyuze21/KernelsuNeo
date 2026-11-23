@@ -15,6 +15,22 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 
+/**
+ * Expressive 风格开关。
+ *
+ * 在原生 Switch 基础上补了滑块内的 Check/Close 图标：关闭态显示叉号有助于
+ * 区分“明确关闭”与“尚未配置”。图标仅在 `showThumbIcon` 为真、且开关处于
+ * 启用态或选中态时出现——禁用且关闭时若仍画叉号，会与灰色轨道糊在一起。
+ *
+ * @param checked 当前开关状态
+ * @param onCheckedChange 状态变化回调，为 null 表示只读展示
+ * @param modifier 外部修饰符
+ * @param thumbContent 自定义滑块内容，传入后覆盖默认图标逻辑
+ * @param enabled 是否可交互
+ * @param colors 颜色 token，默认取 [expressiveSwitchColors]
+ * @param interactionSource 交互状态源，可被外层联动
+ * @param showThumbIcon 是否启用默认的选中/关闭图标
+ */
 @Composable
 fun ExpressiveSwitch(
     checked: Boolean,
@@ -45,6 +61,13 @@ fun ExpressiveSwitch(
     )
 }
 
+/**
+ * 构造开关配色。
+ *
+ * 禁用态统一用 `alpha = 0.12` 的轨道/边框与 `0.38` 的滑块，这是 Material
+ * 的无障碍禁用层级约定；`uncheckedIconColor` 取卡片底色，使关闭图标在
+ * 浅色滑块上仍可见。
+ */
 @Composable
 fun expressiveSwitchColors(
     checkedIconColor: Color = MaterialTheme.colorScheme.primary,

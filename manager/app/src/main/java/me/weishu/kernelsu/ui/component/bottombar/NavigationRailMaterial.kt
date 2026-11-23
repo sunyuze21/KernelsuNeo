@@ -42,6 +42,10 @@ import me.weishu.kernelsu.R
 import me.weishu.kernelsu.data.repository.SettingsRepositoryImpl
 import me.weishu.kernelsu.ui.LocalMainPagerState
 
+/**
+ * Material 宽导航栏。展开/收起状态持久化到 SettingsRepository，
+ * 重启后恢复用户上次的选择；状态变化用 LaunchedEffect 写回，避免在组合期产生副作用。
+ */
 @Composable
 fun NavigationRailMaterial(
     navigationBadge: NavigationBadgeState,
@@ -52,6 +56,7 @@ fun NavigationRailMaterial(
 
     val mainPagerState = LocalMainPagerState.current
 
+    // 条目顺序需与 Pager 页序一致
     val items = listOf(
         Triple(R.string.home, Icons.Filled.Home, Icons.Outlined.Home),
         Triple(R.string.superuser, Icons.Filled.Shield, Icons.Outlined.Shield),
@@ -60,6 +65,7 @@ fun NavigationRailMaterial(
     )
 
     val settingsRepo = remember { SettingsRepositoryImpl() }
+    // 以持久化值作为初始展开状态，避免首帧从收起态跳变
     val state = rememberWideNavigationRailState(
         initialValue = if (settingsRepo.navigationRailExpanded) {
             WideNavigationRailValue.Expanded
@@ -69,6 +75,7 @@ fun NavigationRailMaterial(
     )
     val scope = rememberCoroutineScope()
     val expanded = state.targetValue == WideNavigationRailValue.Expanded
+    // 状态落盘异步进行，只在展开/收起目标变化时写入，减少磁盘 IO
     LaunchedEffect(state.targetValue) {
         settingsRepo.navigationRailExpanded =
             state.targetValue == WideNavigationRailValue.Expanded
@@ -81,6 +88,7 @@ fun NavigationRailMaterial(
             containerColor = MaterialTheme.colorScheme.surfaceContainer,
             contentColor = MaterialTheme.colorScheme.onSurface,
         ),
+        // 处理刘海与系统栏，起始侧留出安全区
         windowInsets = WindowInsets.systemBars.union(WindowInsets.displayCutout).only(
             WindowInsetsSides.Start + WindowInsetsSides.Vertical
         ),
@@ -109,6 +117,7 @@ fun NavigationRailMaterial(
                 railExpanded = expanded,
                 selected = selected,
                 onClick = {
+                    // 已选中不重复滚动，避免无意义的动画
                     if (!selected) {
                         mainPagerState.animateToPage(index)
                     }

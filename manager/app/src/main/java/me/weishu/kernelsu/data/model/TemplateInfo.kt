@@ -11,6 +11,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 
+/**
+ * root profile 模板，可本地保存或从 kernelsu.org 同步。
+ * [local] 为 true 表示用户自己的模板（可导出），远端同步下来的模板为 false。
+ */
 @Immutable
 @Parcelize
 data class TemplateInfo(
@@ -18,26 +22,39 @@ data class TemplateInfo(
     val name: String = "",
     val description: String = "",
     val author: String = "",
+    /** 是否为本地模板；远端模板只在缓存中存在，不会被导出。 */
     val local: Boolean = true,
+    /** mount namespace 策略，取值为 [Natives.Profile.Namespace] 的 ordinal。 */
     val namespace: Int = Natives.Profile.Namespace.INHERITED.ordinal,
     val uid: Int = Natives.ROOT_UID,
     val gid: Int = Natives.ROOT_GID,
+    /** 补充组 GID 列表。 */
     val groups: List<Int> = mutableListOf(),
+    /** Linux capability 编号列表。 */
     val capabilities: List<Int> = mutableListOf(),
+    /** SELinux context，默认进入 KernelSU 域。 */
     val context: String = Natives.KERNEL_SU_DOMAIN,
+    /** 额外的 sepolicy 规则文本，逐条应用。 */
     val rules: List<String> = mutableListOf(),
+    /** root profile 标志的 ordinal 列表。 */
     val flags: List<Int> = mutableListOf(
         Natives.Profile.RootProfileFlag.NO_NEW_PRIVS.ordinal // default no new privs for new template
     )
 ) : Parcelable {
     companion object {
+        /** 日志标签。 */
         private const val TAG = "TemplateInfo"
 
+        /**
+         * 从模板 JSON 解析 [TemplateInfo]；非法字段会被忽略或回退到默认值。
+         * 整体解析失败时返回 null，调用方应跳过该模板而不是中断列表。
+         */
         fun fromJSON(templateJson: JSONObject): TemplateInfo? {
             return runCatching {
                 val groupsJsonArray = templateJson.optJSONArray("groups")
                 val capabilitiesJsonArray = templateJson.optJSONArray("capabilities")
                 val flagsJsonArray = templateJson.optJSONArray("flags")
+                // context / namespace 缺失时使用内核默认值。
                 val context = templateJson.optString("context").takeIf { it.isNotEmpty() }
                     ?: Natives.KERNEL_SU_DOMAIN
                 val namespace = templateJson.optString("namespace").takeIf { it.isNotEmpty() }
@@ -63,6 +80,7 @@ data class TemplateInfo(
                     rules = rulesJsonArray?.mapCatching<String, String>({ it }, {
                         Log.e(TAG, "ignore invalid rule: $it", it)
                     }).orEmpty(),
+                    // flags 缺失时默认 NO_NEW_PRIVS，保持安全默认。
                     flags = flagsJsonArray?.let {
                         getEnumOrdinals(
                             it,
@@ -76,6 +94,7 @@ data class TemplateInfo(
             }.getOrNull()
         }
 
+        /** 读取带多语言覆写的字段：先精确匹配 language_country，再退化到 language。 */
         private fun getLocaleString(json: JSONObject, key: String): String {
             val fallback = json.getString(key)
             val locale = Locale.getDefault()
@@ -93,6 +112,7 @@ data class TemplateInfo(
             return fallback
         }
 
+        /** 逐项转换 JSON 数组；单个元素失败时记录日志并跳过，不影响其余元素。 */
         @Suppress("UNCHECKED_CAST")
         private fun <T, R> JSONArray.mapCatching(
             transform: (T) -> R, onFail: (Throwable) -> Unit
@@ -104,6 +124,7 @@ data class TemplateInfo(
             }
         }
 
+        /** 把 JSON 中的枚举名（大小写不敏感）转成枚举 ordinal；未知项被丢弃。 */
         private inline fun <reified T : Enum<T>> getEnumOrdinals(
             jsonArray: JSONArray?, enumClass: Class<T>
         ): List<T> {
@@ -115,6 +136,7 @@ data class TemplateInfo(
         }
     }
 
+    /** 序列化为模板 JSON；空的可选字段会被省略，枚举以名称形式保存。 */
     fun toJSON(): JSONObject {
         val template = this
         return JSONObject().apply {

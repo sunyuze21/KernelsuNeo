@@ -12,8 +12,15 @@ import java.io.PrintWriter
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
+/**
+ * 收集诊断日志并打包成 tar.gz。
+ *
+ * 需要在 root shell 中执行（读取 dmesg、tombstones、allowlist 等），
+ * 输出放在应用缓存目录。临时目录在打包后会删除，避免残留敏感数据。
+ */
 fun getBugreportFile(context: Context): File {
 
+    // 所有原始日志先汇总到缓存下的 bugreport 目录。
     val bugreportDir = File(context.cacheDir, "bugreport")
     bugreportDir.mkdirs()
 
@@ -40,6 +47,7 @@ fun getBugreportFile(context: Context): File {
     val kernelConfig = File(bugreportDir, "defconfig.gz")
     val kallsyms = File(bugreportDir, "kallsyms.txt")
 
+    // 需要全局挂载命名空间才能看到完整模块与系统日志。
     val shell = getRootShell(true)
 
     // busybox ps has very few features for embed devices
@@ -64,6 +72,7 @@ fun getBugreportFile(context: Context): File {
     shell.newJob().add("cp /proc/modules ${procModules.absolutePath}").exec()
     shell.newJob().add("cp /proc/bootconfig ${bootConfig.absolutePath}").exec()
     shell.newJob().add("cp /proc/config.gz ${kernelConfig.absolutePath}").exec()
+    // 临时放开 kptr_restrict 才能导出完整符号表，结束后必须恢复原值。
     shell.newJob()
         .add($$"ORIG=$(cat /proc/sys/kernel/kptr_restrict); echo 1 > /proc/sys/kernel/kptr_restrict; cat /proc/kallsyms > $${kallsyms.absolutePath}; echo $ORIG > /proc/sys/kernel/kptr_restrict")
         .exec()
@@ -104,6 +113,7 @@ fun getBugreportFile(context: Context): File {
     val modulesFile = File(bugreportDir, "modules.json")
     modulesFile.writeText(listModules())
 
+    // 文件名带时间戳，便于多次导出时区分。
     val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH_mm")
     val current = LocalDateTime.now().format(formatter)
 

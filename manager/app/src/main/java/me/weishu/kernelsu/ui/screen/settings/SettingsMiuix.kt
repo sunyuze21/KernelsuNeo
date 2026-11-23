@@ -24,6 +24,7 @@ import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.DeveloperMode
 import androidx.compose.material.icons.rounded.DisplaySettings
 import androidx.compose.material.icons.rounded.FlashOn
+import androidx.compose.material.icons.rounded.GppGood
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.LayersClear
 import androidx.compose.material.icons.rounded.Palette
@@ -67,6 +68,7 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
  * @author weishu
  * @date 2023/1/1.
  */
+// 设置页的 Miuix 布局：与 Material 版本共享状态和动作，只在组件与视觉上不同。
 @Composable
 fun SettingPagerMiuix(
     uiState: SettingsUiState,
@@ -74,11 +76,13 @@ fun SettingPagerMiuix(
     bottomInnerPadding: Dp,
 ) {
     val scrollBehavior = MiuixScrollBehavior()
+    // 模糊背景依赖运行时着色器；不支持时 backdrop 为空，顶栏退化为纯色。
     val enableBlur = LocalEnableBlur.current
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
     val loadingDialog = rememberLoadingDialog()
+    // 使用 rememberSaveable，旋转屏幕或进程重建后对话框状态不会丢失。
     val showUninstallDialog = rememberSaveable { mutableStateOf(false) }
     val showSendLogDialog = rememberSaveable { mutableStateOf(false) }
 
@@ -126,6 +130,7 @@ fun SettingPagerMiuix(
                             checked = uiState.checkUpdate,
                             onCheckedChange = actions.onSetCheckUpdate
                         )
+                        // 模块更新检查依赖内核接口，未激活时隐藏该项。
                         KsuIsValid {
                             SwitchPreference(
                                 title = stringResource(id = R.string.settings_module_check_update),
@@ -144,6 +149,7 @@ fun SettingPagerMiuix(
                         }
                     }
 
+                    // UI 模式与主题只影响管理器外观，不依赖内核。
                     Card(
                         modifier = Modifier
                             .padding(top = 12.dp)
@@ -161,6 +167,7 @@ fun SettingPagerMiuix(
                                     tint = colorScheme.onBackground
                                 )
                             },
+                            // 索引 0 为 Miuix、1 为 Material，与 UiMode 下拉文案顺序一致。
                             selectedIndex = if (uiState.uiMode == UiMode.Material.value) 1 else 0,
                             onSelectedIndexChange = actions.onSetUiModeIndex
                         )
@@ -179,6 +186,7 @@ fun SettingPagerMiuix(
                         )
                     }
 
+                    // 应用 profile 模板依赖 root 与内核接口，未激活时不展示。
                     KsuIsValid {
                         Card(
                             modifier = Modifier
@@ -208,6 +216,7 @@ fun SettingPagerMiuix(
                                 .padding(top = 12.dp)
                                 .fillMaxWidth(),
                         ) {
+                            // 每个功能都有独立的内核能力状态：supported 才可编辑，managed/forced 表示由上层策略接管。
                             val suCompatModeItems = listOf(
                                 stringResource(id = R.string.settings_mode_enable_by_default),
                                 stringResource(id = R.string.settings_mode_disable_until_reboot),
@@ -346,6 +355,7 @@ fun SettingPagerMiuix(
                                 checked = uiState.isShellSuAdbOnlyEnabled,
                                 onCheckedChange = actions.onSetShellSuAdbOnlyEnabled
                             )
+                            // late-load 模式下无法软重启，且开关强制显示为开启。
                             SwitchPreference(
                                 title = stringResource(id = R.string.settings_soft_reboot),
                                 summary = stringResource(id = R.string.settings_soft_reboot_summary),
@@ -368,6 +378,7 @@ fun SettingPagerMiuix(
                                 .padding(top = 12.dp)
                                 .fillMaxWidth(),
                         ) {
+                            // 全局默认值与调试开关，作用于之后新授权或启动的应用。
                             SwitchPreference(
                                 title = stringResource(id = R.string.settings_umount_modules_default),
                                 summary = stringResource(id = R.string.settings_umount_modules_default_summary),
@@ -381,6 +392,22 @@ fun SettingPagerMiuix(
                                 },
                                 checked = uiState.isDefaultUmountModules,
                                 onCheckedChange = actions.onSetDefaultUmountModules
+                            )
+
+                            // 实验性：由 ksud 根据标记文件校验安装包签名。
+                            SwitchPreference(
+                                title = stringResource(id = R.string.settings_module_integrity_check),
+                                summary = stringResource(id = R.string.settings_module_integrity_check_summary),
+                                startAction = {
+                                    Icon(
+                                        Icons.Rounded.GppGood,
+                                        modifier = Modifier.padding(end = 6.dp),
+                                        contentDescription = stringResource(id = R.string.settings_module_integrity_check),
+                                        tint = colorScheme.onBackground
+                                    )
+                                },
+                                checked = uiState.isModuleIntegrityCheckEnabled,
+                                onCheckedChange = actions.onSetModuleIntegrityCheckEnabled
                             )
 
                             SwitchPreference(
@@ -415,6 +442,7 @@ fun SettingPagerMiuix(
                         }
                     }
 
+                    // 只有 LKM 模式才有由管理器加载的内核模块，才允许卸载。
                     if (uiState.isLkmMode) {
                         Card(
                             modifier = Modifier
@@ -424,6 +452,7 @@ fun SettingPagerMiuix(
                             val uninstall = stringResource(id = R.string.settings_uninstall)
                             ArrowPreference(
                                 title = uninstall,
+                                // late-load 模式下卸载内核可能使设备无法再次激活，禁止操作。
                                 enabled = !uiState.isLateLoadMode,
                                 startAction = {
                                     Icon(
@@ -447,6 +476,7 @@ fun SettingPagerMiuix(
                             .padding(vertical = 12.dp)
                             .fillMaxWidth(),
                     ) {
+                        // 诊断与关于入口不依赖 root，未激活时也应可用。
                         ArrowPreference(
                             title = stringResource(id = R.string.send_log),
                             startAction = {

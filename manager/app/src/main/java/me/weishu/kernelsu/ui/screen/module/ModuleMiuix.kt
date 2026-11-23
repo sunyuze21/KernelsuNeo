@@ -155,6 +155,7 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
+/** Miuix 风格的模块页实现，与 Material 版共用 uiState/actions，仅视觉层不同。 */
 @SuppressLint("StringFormatInvalid", "LocalContextGetResourceValueCall")
 @Composable
 fun ModulePagerMiuix(
@@ -172,6 +173,7 @@ fun ModulePagerMiuix(
     val density = LocalDensity.current
     val enableBlur = LocalEnableBlur.current
 
+    // 多选安装时用于拼出“将安装以下模块”的提示，占位符由代码填入文件名
     val installPromptWithName = stringResource(R.string.module_install_prompt_with_name, "%s")
     val confirmDialog = rememberConfirmDialog(
         onConfirm = {
@@ -191,6 +193,7 @@ fun ModulePagerMiuix(
     )
 
     val scrollBehavior = MiuixScrollBehavior()
+    // 顶栏折叠时同步收缩搜索栏上边距，避免展开状态下留白过多
     val dynamicTopPadding by remember {
         derivedStateOf { 12.dp * (1f - scrollBehavior.state.collapsedFraction) }
     }
@@ -219,6 +222,7 @@ fun ModulePagerMiuix(
     }
 
     val scope = rememberCoroutineScope()
+    // 新的重启提示要覆盖旧的，保存 Job 以便主动取消
     val snackbarJob = remember { mutableStateOf<Job?>(null) }
     ObserveAsEvents(moduleEvent) { event ->
         when (event) {
@@ -246,6 +250,7 @@ fun ModulePagerMiuix(
         }
     }
 
+    // 长按动作/WebUI 按钮时先绑定模块，再选中类型并打开编辑对话框
     fun onModuleAddShortcut(module: Module, type: ShortcutType) {
         shortcutState.bindModule(module)
         shortcutState.selectType(type)
@@ -253,10 +258,12 @@ fun ModulePagerMiuix(
     }
 
     val listState = rememberLazyListState()
+    // 下拉刷新计数只用于触发“回到顶部”，不参与数据请求
     val refreshTick = remember { mutableIntStateOf(0) }
 
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
+    // 模糊生效时顶栏需透明，让背景层透出
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
     Scaffold(
@@ -358,6 +365,7 @@ fun ModulePagerMiuix(
             if (uiState.installButtonVisible) {
                 val moduleInstall = stringResource(id = R.string.module_install)
                 val confirmTitle = stringResource(R.string.module)
+                // 多选时先暂存 uris，等用户在确认框中确认后再统一进入刷写流程
                 var zipUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
                 val confirmDialog = rememberConfirmDialog(
                     onConfirm = {
@@ -387,6 +395,7 @@ fun ModulePagerMiuix(
                     } else if (uris.size > 1) {
                         // multiple files selected
                         zipUris = uris
+                        // 逐个列出待安装文件名，让用户确认批量安装范围
                         val moduleNames = uris.mapIndexed { index, uri -> "\n${index + 1}. ${uri.getFileName(context)}" }.joinToString("")
                         val confirmContent = installPromptWithName.format(moduleNames)
                         confirmDialog.showConfirm(
@@ -420,6 +429,7 @@ fun ModulePagerMiuix(
             }
         },
         popupHost = {
+            // 搜索使用独立浮层，复用 ModuleList 但内容内边距按键盘高度收缩
             searchStatus.SearchPager(
                 onSearchStatusChange = actions.onSearchStatusChange,
                 defaultResult = {},
@@ -456,6 +466,7 @@ fun ModulePagerMiuix(
         },
         contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal)
     ) { innerPadding ->
+        // Magisk 共存冲突时只显示提示，避免用户继续安装导致启动失败
         if (uiState.magiskInstalled) {
             Box(
                 modifier = Modifier
@@ -495,6 +506,7 @@ fun ModulePagerMiuix(
                 refreshTexts = refreshTexts,
                 contentPadding = contentPadding,
             ) {
+                // 首次加载期间不显示“空列表”，避免闪一下空态再出现数据
                 if (modules.isEmpty()) {
                     Box(
                         modifier = Modifier
@@ -518,6 +530,7 @@ fun ModulePagerMiuix(
                         }
                     }
                 } else {
+                    // 用最新值回调，避免排序/刷新后闭包仍持有旧列表
                     val latestModules = rememberUpdatedState(modules)
                     val latestRefreshing = rememberUpdatedState(uiState.isRefreshing)
                     ScrollToTopOnChange(
@@ -564,6 +577,7 @@ fun ModulePagerMiuix(
     )
 }
 
+/** 快捷方式编辑对话框（Miuix）；与 Material 版共享 ModuleShortcutState 的行为。 */
 @Composable
 private fun ModuleShortcutDialog(
     show: Boolean,
@@ -576,6 +590,7 @@ private fun ModuleShortcutDialog(
     val context = LocalContext.current
     val resources = LocalResources.current
 
+    // 复制深链供用户自行创建入口；条件不足时静默失败
     fun copyShortcutUrl() {
         val url = shortcutState.buildShortcutUrl() ?: return
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -686,6 +701,7 @@ private fun ModuleShortcutDialog(
     )
 }
 
+/** 模块列表（Miuix）；key 固定为模块 id，保证排序或增删时 item 状态与动画正确。 */
 @Composable
 private fun ModuleList(
     modifier: Modifier = Modifier,
@@ -702,6 +718,7 @@ private fun ModuleList(
         state = listState,
         modifier = modifier.fillMaxHeight(),
         contentPadding = contentPadding,
+        // 关闭自带 overscroll，交由外层 overScrollVertical 统一处理
         overscrollEffect = null,
     ) {
         items(
@@ -709,6 +726,7 @@ private fun ModuleList(
             key = { it.id },
             contentType = { "module" }
         ) { module ->
+            // item 内容在协程回调中异步使用，必须读取最新模块快照而非组合时的旧值
             val currentModuleState = rememberUpdatedState(module)
             val moduleUpdateInfo = updateInfoMap[module.id] ?: ModuleUpdateInfo.Empty
             val content: @Composable () -> Unit = {
@@ -719,11 +737,13 @@ private fun ModuleList(
                         actions.onRequestUninstallConfirmation(currentModuleState.value)
                     },
                     onUndoUninstall = {
+                        // 撤销卸载会改写模块目录，需用加载框屏蔽重复点击
                         scope.launch {
                             loadingDialog.withLoading { actions.onUndoUninstallModule(module) }
                         }
                     },
                     onCheckChanged = { _: Boolean ->
+                        // 开关切换涉及脚本与目录操作，同样加加载态
                         scope.launch {
                             loadingDialog.withLoading {
                                 actions.onToggleModule(module)
@@ -756,6 +776,7 @@ private fun ModuleList(
     }
 }
 
+/** 单个模块卡片（Miuix）；布局与 Material 版一致，但使用 Miuix 组件与主题色。 */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ModuleItem(
@@ -770,13 +791,16 @@ fun ModuleItem(
     onOpenWebUi: () -> Unit
 ) {
     val secondaryContainer = colorScheme.secondaryContainer.copy(alpha = 0.8f)
+    // 深色模式下图标需要更高不透明度才清晰
     val actionIconTint = colorScheme.onSurface.copy(alpha = if (isInDarkTheme()) 0.7f else 0.9f)
     val updateBg = colorScheme.tertiaryContainer.copy(alpha = 0.6f)
     val updateTint = colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
+    // 只有拿到下载地址才展示更新按钮
     val hasUpdate = updateUrl.isNotEmpty()
     val textDecoration = if (module.remove) TextDecoration.LineThrough else null
     val hasDescription = module.description.isNotBlank()
     val maxLinesLimit = LocalModuleDescriptionMaxLines.current
+    // 以 id 为 key 保存展开状态，避免列表变化后状态错位
     var expanded by rememberSaveable(module.id) { mutableStateOf(false) }
 
     Card(
@@ -803,6 +827,7 @@ fun ModuleItem(
                 SubcomposeLayout { constraints ->
                     val spacingPx = 6.dp.roundToPx()
                     var nameTextLayout: TextLayoutResult? = null
+                    // 元模块标签需要与模块名同一行右对齐；先测量标签宽度再从名称可用宽度中扣除
                     val metaPlaceable = if (module.metamodule) {
                         subcompose("meta") {
                             Text(
@@ -872,6 +897,7 @@ fun ModuleItem(
                 }
             }
             Switch(
+                // 更新过程中禁止再次切换，避免状态互相覆盖
                 enabled = !module.update,
                 checked = module.enabled,
                 onCheckedChange = {
@@ -901,6 +927,7 @@ fun ModuleItem(
         )
 
         Row {
+            // 待卸载、已禁用或正在更新的模块不显示动作/WebUI 入口
             AnimatedVisibility(
                 visible = module.enabled && !module.remove && !module.update,
                 enter = fadeIn(),
@@ -1016,6 +1043,7 @@ fun ModuleItem(
             IconButton(
                 minHeight = 35.dp,
                 minWidth = 35.dp,
+                // remove 为 true 时按钮表示撤销卸载，否则请求卸载
                 onClick = if (module.remove) onUndoUninstall else onUninstall,
                 backgroundColor = if (module.remove) {
                     secondaryContainer.copy(alpha = 0.8f)
@@ -1023,6 +1051,7 @@ fun ModuleItem(
                     secondaryContainer
                 },
             ) {
+                // 有更新按钮时收窄内边距，让两个图标按钮在窄屏上仍能并排
                 val animatedPadding by animateDpAsState(
                     targetValue = if (!hasUpdate) 10.dp else 0.dp,
                     animationSpec = tween(durationMillis = 300)

@@ -19,33 +19,41 @@ use std::{
 };
 
 // 空间按文件系统块计算
-const BLOCK: u64 = 4096;
+const FS_BLOCK_SIZE: u64 = 4096;
 // preinit/ 下所有内容的总上限
-const LIMIT_TOTAL: u64 = 4 << 20;
+const PREINIT_TOTAL_LIMIT: u64 = 4 << 20;
 // 始终在 /metadata 上预留这么多空间：它还要存放 vold key 和 OTA 状态
-const RESERVE: u64 = 8 << 20;
+const METADATA_RESERVE: u64 = 8 << 20;
 // 必须与 runner 中的 BOOTCOUNT_LIMIT 保持一致
 const BOOTCOUNT_LIMIT: u64 = 3;
 
 // 写入状态文件的值；Manager 会把它们映射成用户可见的文案。`bootloop` 不会写在这里，
 // 它是在读取状态时由启动计数推导出来的。
 const STATE_OK: &str = "ok";
+/// preinit 内容因磁盘空间不足而未能同步。
 const STATE_NO_SPACE: &str = "no_space";
+/// 扫描或复制 preinit 内容时发生错误。
 const STATE_ERROR: &str = "error";
+/// 由启动计数推导出的状态：连续多次开机失败后 preinit 被内核跳过。
 const STATE_BOOTLOOP: &str = "bootloop";
+/// 当前内核不支持执行 preinit。
 const STATE_UNSUPPORTED: &str = "unsupported";
 
 /// 模块 preinit 目录中的一个文件或目录。
-struct Entry {
+struct PreinitEntry {
+    /// 相对模块 `preinit/` 目录的路径；扫描、清单和暂存复制都以它为基准。
     rel: PathBuf,
+    /// 是否为目录；目录本身不承载内容，复制时只按一个文件系统块计入预算。
     is_dir: bool,
+    /// 普通文件的字节数；目录固定记为 0，避免把目录项大小混进内容预算。
     size: u64,
     // 用 ctime 而非 mtime：解压会保留 zip 里的 mtime，但 ctime 总会被设置
     ctime: (i64, i64),
+    /// 从元数据取出的 Unix 权限位（已截断到 0o7777），安装时再收紧到 0o755。
     mode: u32,
 }
 
-impl Entry {
+impl PreinitEntry {
     /// 生成清单中的一行：`id<TAB>类型<TAB>大小<TAB>ctime<TAB>权限<TAB>相对路径`。
     ///
     /// 清单只是 ksud 自己的记录：把本次生成的行与上次的文件对比，就能在不重新读取每个文件的情况下
@@ -64,7 +72,8 @@ impl Entry {
 }
 
 /// 单个模块的处理结果，序列化到 `PREINIT_STATUS_PATH` 供 `ksud module list` 和 Manager 使用。
-struct Status {
+struct ModuleStatus {
+    /// 模块 id，对应 `/data/adb/modules/<id>` 下的目录名，也是状态文件的行首字段。
     id: String,
     /// `STATE_*` 常量之一；`STATE_BOOTLOOP` 只在读取时合成，不会写入文件。
     state: &'static str,
@@ -74,14 +83,14 @@ struct Status {
 
 /// 向上取整到文件系统块，因为实际占用就是按块计算的。
 const fn round_up(size: u64) -> u64 {
-    size.div_ceil(BLOCK) * BLOCK
+    size.div_ceil(FS_BLOCK_SIZE) * FS_BLOCK_SIZE
 }
 
 /// 递归收集 `root/rel` 下的条目到 `out`，顺序稳定（已排序）。
 ///
 /// 顺序很重要，因为清单行会与上一次的结果逐行对比。符号链接和特殊文件直接拒绝：内核 runner
 /// 不会处理它们。
-fn scan(root: &Path, rel: &Path, out: &mut Vec<Entry>) -> Result<()> {
+fn scan_tree(root: &Path, rel: &Path, out: &mut Vec<PreinitEntry>) -> Result<()> {
     let dir = root.join(rel);
     let mut entries: Vec<_> = fs::read_dir(&dir)
         .with_context(|| format!("Failed to read {}", dir.display()))?
@@ -95,7 +104,7 @@ fn scan(root: &Path, rel: &Path, out: &mut Vec<Entry>) -> Result<()> {
         if !file_type.is_dir() && !file_type.is_file() {
             bail!("unsupported file type: {}", rel.display());
         }
-        out.push(Entry {
+        out.push(PreinitEntry {
             rel: rel.clone(),
             is_dir: file_type.is_dir(),
             size: if file_type.is_file() { meta.len() } else { 0 },
@@ -103,18 +112,24 @@ fn scan(root: &Path, rel: &Path, out: &mut Vec<Entry>) -> Result<()> {
             mode: meta.mode() & 0o7777,
         });
         if file_type.is_dir() {
-            scan(root, &rel, out)?;
+            scan_tree(root, &rel, out)?;
         }
     }
     Ok(())
 }
 
 /// 复制所需的磁盘空间，包含模块目录本身。
-fn usage(entries: &[Entry]) -> u64 {
-    BLOCK
+fn copy_usage(entries: &[PreinitEntry]) -> u64 {
+    FS_BLOCK_SIZE
         + entries
             .iter()
-            .map(|e| if e.is_dir { BLOCK } else { round_up(e.size) })
+            .map(|e| {
+                if e.is_dir {
+                    FS_BLOCK_SIZE
+                } else {
+                    round_up(e.size)
+                }
+            })
             .sum::<u64>()
 }
 
@@ -139,17 +154,17 @@ fn disk_usage(path: &Path) -> u64 {
 /// `path` 所在文件系统的可用字节数。
 ///
 /// 使用 `f_bavail` 而不是 `f_bfree`，以避开 root 保留块，与普通写入者实际能分配的空间一致。
-fn available(path: &Path) -> Result<u64> {
-    let st = rustix::fs::statvfs(path)
+fn available_bytes(path: &Path) -> Result<u64> {
+    let fs_stat = rustix::fs::statvfs(path)
         .with_context(|| format!("Failed to statvfs {}", path.display()))?;
-    Ok(st.f_bavail * st.f_frsize)
+    Ok(fs_stat.f_bavail * fs_stat.f_frsize)
 }
 
 /// runner 会拒绝任何非 root 所有、或对 group/other 可写的文件。
 ///
 /// 权限统一与 0o755 相与：无论模块带来什么，setuid/setgid/sticky 位以及 group/other 的写权限
 /// 都会被去掉。设置标签失败只告警，因为文件内容本身是对的，后续 restorecon 还能补上标签。
-fn secure(path: &Path, mode: u32, con: &str) -> Result<()> {
+fn secure_path(path: &Path, mode: u32, con: &str) -> Result<()> {
     lchown(path, Some(0), Some(0))
         .with_context(|| format!("Failed to chown {}", path.display()))?;
     fs::set_permissions(path, Permissions::from_mode(mode & 0o755))
@@ -173,14 +188,20 @@ fn sync_dir(path: &Path) {
 ///
 /// 暂存目录以点开头，因为内核 runner 会忽略隐藏条目，所以同步在任何时刻中断都不会留下可执行的
 /// 半成品模块。
-fn install(preinit_dir: &Path, id: &str, src: &Path, entries: &[Entry], con: &str) -> Result<()> {
+fn install_module_copy(
+    preinit_dir: &Path,
+    id: &str,
+    src: &Path,
+    entries: &[PreinitEntry],
+    con: &str,
+) -> Result<()> {
     // 上次异常退出留下的残留，先清理干净。
     let tmp = preinit_dir.join(format!(".{id}.tmp"));
     if tmp.exists() {
         fs::remove_dir_all(&tmp)?;
     }
     fs::create_dir(&tmp).with_context(|| format!("Failed to create {}", tmp.display()))?;
-    secure(&tmp, 0o755, con)?;
+    secure_path(&tmp, 0o755, con)?;
 
     for entry in entries {
         let to = tmp.join(&entry.rel);
@@ -192,7 +213,7 @@ fn install(preinit_dir: &Path, id: &str, src: &Path, entries: &[Entry], con: &st
             // 在下面的重命名之前逐个同步文件；目录同步放在后面统一做。
             File::open(&to)?.sync_all()?;
         }
-        secure(&to, entry.mode, con)?;
+        secure_path(&to, entry.mode, con)?;
     }
     // 先同步子目录再同步父目录，确保整棵树在对外可见前已经落盘。
     for entry in entries.iter().filter(|e| e.is_dir) {
@@ -220,9 +241,9 @@ fn install(preinit_dir: &Path, id: &str, src: &Path, entries: &[Entry], con: &st
 
 /// 判断 `dst` 是否已与 `install` 将要复制的内容完全一致：对模块文件做
 /// chmod、chcon 会改变 ctime，但不应被视为内容更新。
-fn same_copy(dst: &Path, src: &Path, entries: &[Entry]) -> bool {
+fn same_content(dst: &Path, src: &Path, entries: &[PreinitEntry]) -> bool {
     let mut existing = Vec::new();
-    if scan(dst, Path::new(""), &mut existing).is_err() || existing.len() != entries.len() {
+    if scan_tree(dst, Path::new(""), &mut existing).is_err() || existing.len() != entries.len() {
         return false;
     }
     entries.iter().zip(&existing).all(|(want, have)| {
@@ -241,14 +262,14 @@ fn same_copy(dst: &Path, src: &Path, entries: &[Entry]) -> bool {
 /// 把 `sync_candidates` 上次写下的清单解析成 `id -> 原始行`。
 ///
 /// 清单缺失或无法读取时返回空 map，这只会让所有模块看起来都变了；`sync_candidates` 里的比较
-/// 随后会退回到 `same_copy`。
+/// 随后会退回到 `same_content`。
 fn read_manifest(path: &Path) -> HashMap<String, Vec<String>> {
     let mut manifest: HashMap<String, Vec<String>> = HashMap::new();
     let Ok(content) = fs::read_to_string(path) else {
         return manifest;
     };
     for line in content.lines() {
-        // 模块 id 是第一个以制表符分隔的字段（见 `Entry::manifest_line`）。
+        // 模块 id 是第一个以制表符分隔的字段（见 `PreinitEntry::manifest_line`）。
         if let Some((id, _)) = line.split_once('\t') {
             manifest
                 .entry(id.to_owned())
@@ -271,10 +292,10 @@ fn write_atomic(path: &Path, content: &str) -> Result<()> {
 /// 把每个模块的状态行（`id state message`）写入文件，供之后查询。
 ///
 /// 这只是诊断信息，写入失败仅记录日志，不会让同步失败。
-fn write_status(status: &[Status]) {
+fn write_status(statuses: &[ModuleStatus]) {
     let mut content = String::new();
-    for s in status {
-        let _ = writeln!(content, "{} {} {}", s.id, s.state, s.message);
+    for status in statuses {
+        let _ = writeln!(content, "{} {} {}", status.id, status.state, status.message);
     }
     let result = ensure_dir_exists(defs::WORKING_DIR)
         .and_then(|()| write_atomic(Path::new(defs::PREINIT_STATUS_PATH), &content));
@@ -299,7 +320,7 @@ fn remove_entry(path: &Path) -> bool {
 /// 清空 `ksu_dir` 下所有 preinit 状态（副本和启动计数）。
 ///
 /// 用于旧版本探测顺序留下的过期 preinit 目录，以及当前内核根本不支持 preinit 的情况。
-fn remove_all(ksu_dir: &Path) {
+fn remove_ksu_preinit(ksu_dir: &Path) {
     let preinit_dir = ksu_dir.join(defs::PREINIT_SUBDIR);
     if preinit_dir.exists()
         && let Err(e) = fs::remove_dir_all(&preinit_dir)
@@ -321,26 +342,26 @@ pub fn sync(
     // 内核会按顺序探测多个 preinit 位置；如果本次选中的目录与上次不同，就清掉旧目录里的副本，
     // 避免降级后复活过期模块。
     for stale in stale_ksu_dirs {
-        remove_all(stale);
+        remove_ksu_preinit(stale);
     }
 
     // 没有任何东西会执行这些副本：保持 /metadata 干净，并说明原因。
     if !supported {
-        remove_all(ksu_dir);
-        let status: Vec<Status> = modules
+        remove_ksu_preinit(ksu_dir);
+        let statuses: Vec<ModuleStatus> = modules
             .iter()
             .filter(|(_, dir)| dir.join(defs::MODULE_PREINIT_DIR).is_dir())
-            .map(|(id, _)| Status {
+            .map(|(id, _)| ModuleStatus {
                 id: id.clone(),
                 state: STATE_UNSUPPORTED,
                 message: "kernel does not run preinit".to_owned(),
             })
             .collect();
-        write_status(&status);
+        write_status(&statuses);
         return Ok(());
     }
 
-    let mut status = Vec::new();
+    let mut statuses = Vec::new();
     let mut candidates = Vec::new();
     for (id, module_dir) in modules {
         let src = module_dir.join(defs::MODULE_PREINIT_DIR);
@@ -350,13 +371,13 @@ pub fn sync(
         let mut entries = Vec::new();
         // preinit.conf 是 runner 的入口脚本，没有它的目录不会产生任何效果。
         let scanned = if src.join(defs::PREINIT_CONF).is_file() {
-            scan(&src, Path::new(""), &mut entries)
+            scan_tree(&src, Path::new(""), &mut entries)
         } else {
             Err(anyhow::anyhow!("{} not found", defs::PREINIT_CONF))
         };
         match scanned {
             Ok(()) => candidates.push((id.clone(), src, entries)),
-            Err(e) => status.push(Status {
+            Err(e) => statuses.push(ModuleStatus {
                 id: id.clone(),
                 state: STATE_ERROR,
                 message: format!("{e:#}"),
@@ -365,18 +386,18 @@ pub fn sync(
     }
 
     if candidates.is_empty() {
-        remove_all(ksu_dir);
-        write_status(&status);
+        remove_ksu_preinit(ksu_dir);
+        write_status(&statuses);
         return Ok(());
     }
 
     let mut changed = false;
-    let result = sync_candidates(ksu_dir, con, &candidates, &mut status, &mut changed);
+    let result = sync_candidates(ksu_dir, con, &candidates, &mut statuses, &mut changed);
     if let Err(e) = &result {
         // 尚未完成处理的模块都不会按预期运行
         for (id, _, _) in &candidates {
-            if !status.iter().any(|s| &s.id == id) {
-                status.push(Status {
+            if !statuses.iter().any(|existing| &existing.id == id) {
+                statuses.push(ModuleStatus {
                     id: id.clone(),
                     state: STATE_ERROR,
                     message: format!("{e:#}"),
@@ -391,8 +412,8 @@ pub fn sync(
         sync_dir(ksu_dir);
     }
 
-    status.sort_by(|a, b| a.id.cmp(&b.id));
-    write_status(&status);
+    statuses.sort_by(|a, b| a.id.cmp(&b.id));
+    write_status(&statuses);
     result
 }
 
@@ -402,35 +423,35 @@ pub fn sync(
 fn sync_candidates(
     ksu_dir: &Path,
     con: &str,
-    candidates: &[(String, PathBuf, Vec<Entry>)],
-    status: &mut Vec<Status>,
+    candidates: &[(String, PathBuf, Vec<PreinitEntry>)],
+    statuses: &mut Vec<ModuleStatus>,
     changed: &mut bool,
 ) -> Result<()> {
     let preinit_dir = ksu_dir.join(defs::PREINIT_SUBDIR);
 
     // ksud 以 umask 0 运行；这里收紧旧版本创建内容的权限
-    secure(ksu_dir, 0o755, con)?;
+    secure_path(ksu_dir, 0o755, con)?;
     ensure_dir_exists(&preinit_dir)?;
-    secure(&preinit_dir, 0o755, con)?;
+    secure_path(&preinit_dir, 0o755, con)?;
 
     let manifest_path = preinit_dir.join(defs::PREINIT_MANIFEST_FILE);
     let old_manifest = read_manifest(&manifest_path);
 
     // 挑选放得下的模块，并把每个已存在的副本都视为可回收空间
-    let free = available(ksu_dir)? + disk_usage(&preinit_dir);
-    // 既限制总量，也为共享同一 /metadata 文件系统的 vold key/OTA 状态留出 RESERVE。
-    let budget = LIMIT_TOTAL.min(free.saturating_sub(RESERVE));
+    let free = available_bytes(ksu_dir)? + disk_usage(&preinit_dir);
+    // 既限制总量，也为共享同一 /metadata 文件系统的 vold key/OTA 状态留出 METADATA_RESERVE。
+    let budget = PREINIT_TOTAL_LIMIT.min(free.saturating_sub(METADATA_RESERVE));
     // preinit/ 目录本身和清单文件
-    let mut used = 2 * BLOCK;
+    let mut used = 2 * FS_BLOCK_SIZE;
     let mut fit = Vec::new();
     for (id, src, entries) in candidates {
-        let need = usage(entries);
+        let need = copy_usage(entries);
         if used + need > budget {
             info!(
                 "preinit: {id} needs {need} bytes, {} left",
                 budget.saturating_sub(used)
             );
-            status.push(Status {
+            statuses.push(ModuleStatus {
                 id: id.clone(),
                 state: STATE_NO_SPACE,
                 message: format!("need {need}, available {}", budget.saturating_sub(used)),
@@ -450,29 +471,32 @@ fn sync_candidates(
     for (id, src, entries, need) in fit {
         let lines: Vec<String> = entries.iter().map(|e| e.manifest_line(id)).collect();
         let dst = preinit_dir.join(id);
-        // 清单命中时开销很小；`same_copy` 用于清单缺失或过期的情况（例如从旧版 ksud 升级后的
+        // 清单命中时开销很小；`same_content` 用于清单缺失或过期的情况（例如从旧版 ksud 升级后的
         // 第一次运行）。
         let unchanged = dst.is_dir()
-            && (old_manifest.get(id.as_str()) == Some(&lines) || same_copy(&dst, src, entries));
+            && (old_manifest.get(id.as_str()) == Some(&lines) || same_content(&dst, src, entries));
         if !unchanged {
-            // 预算把旧副本视为可回收空间，但 install() 会先写入新副本：
+            // 预算把旧副本视为可回收空间，但 install_module_copy() 会先写入新副本：
             // 两者同时存在会侵占预留空间时，先删掉旧副本。
-            if available(ksu_dir)? < need + RESERVE && dst.exists() {
+            if available_bytes(ksu_dir)? < need + METADATA_RESERVE && dst.exists() {
                 remove_entry(&dst);
                 *changed = true;
             }
-            let avail = available(ksu_dir)?;
-            if avail < need + RESERVE {
-                status.push(Status {
+            let avail = available_bytes(ksu_dir)?;
+            if avail < need + METADATA_RESERVE {
+                statuses.push(ModuleStatus {
                     id: id.clone(),
                     state: STATE_NO_SPACE,
-                    message: format!("need {need}, available {}", avail.saturating_sub(RESERVE)),
+                    message: format!(
+                        "need {need}, available {}",
+                        avail.saturating_sub(METADATA_RESERVE)
+                    ),
                 });
                 continue;
             }
-            if let Err(e) = install(&preinit_dir, id, src, entries, con) {
+            if let Err(e) = install_module_copy(&preinit_dir, id, src, entries, con) {
                 warn!("preinit: install {id} failed: {e:#}");
-                status.push(Status {
+                statuses.push(ModuleStatus {
                     id: id.clone(),
                     state: STATE_ERROR,
                     message: format!("{e:#}"),
@@ -488,7 +512,7 @@ fn sync_candidates(
             manifest.push_str(&line);
             manifest.push('\n');
         }
-        status.push(Status {
+        statuses.push(ModuleStatus {
             id: id.clone(),
             state: STATE_OK,
             message: String::new(),

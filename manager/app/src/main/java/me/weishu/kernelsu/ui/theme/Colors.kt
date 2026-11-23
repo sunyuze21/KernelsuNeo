@@ -3,6 +3,11 @@ package me.weishu.kernelsu.ui.theme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 
+/**
+ * 主题强调色候选项，以 ARGB Int 形式保存，便于直接写入 SharedPreferences 并传给原生代码。
+ *
+ * 使用 Int 而非 Compose 的 Color，是为了让偏好设置层不依赖 Compose 运行时。
+ */
 val keyColorOptions = listOf(
     Color(0xFFF44336).toArgb(),
     Color(0xFFE91E63).toArgb(),

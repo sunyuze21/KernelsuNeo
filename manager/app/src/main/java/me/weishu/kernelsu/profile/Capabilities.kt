@@ -1,6 +1,10 @@
 package me.weishu.kernelsu.profile
 
 /**
+ * 可授予 root 进程的 Linux capability 列表。
+ * [cap] 是内核使用的 capability 编号，会写入 [me.weishu.kernelsu.Natives.Profile.capabilities]；
+ * [display] 用于 UI 展示，[desc] 是内核文档中的说明。
+ *
  * @author weishu
  * @date 2023/6/3.
  */

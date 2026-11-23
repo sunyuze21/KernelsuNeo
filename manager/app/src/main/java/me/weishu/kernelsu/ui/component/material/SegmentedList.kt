@@ -72,15 +72,27 @@ import androidx.compose.ui.zIndex
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
+/** 由分段容器向下传递的形状；为 null 表示调用方不在分组内，需要自行回退默认形状 */
 val LocalListItemShapes = compositionLocalOf<ListItemShapes?> { null }
+// 组首/尾用 16.dp 大圆角，视觉上把多条列表“拼”成一整张卡片
 private val SegmentedOuterRadius = 16.dp
+// 中间项只留 4.dp，与大圆角形成对比，同时避免相邻项之间出现明显缝隙
 private val SegmentedInnerRadius = 4.dp
+// 弹簧刚度偏硬，保证显隐动画干脆收尾
 private const val SegmentedSpringStiffness = 800f
+// 阻尼接近临界值（0.9），轻微过冲但不产生可见回弹抖动
 private const val SegmentedSpringDamping = 0.9f
 
+/** DSL 标记：限制 SegmentedColumnScope 的成员只能在最内层作用域调用，防止嵌套作用域串用 */
 @DslMarker
 annotation class SegmentedColumnDsl
 
+/**
+ * 分段列表的默认配色。
+ *
+ * 禁用态容器色刻意与正常态保持一致，只靠内容色降级来表达不可用，
+ * 否则整块卡片变灰会破坏分组的一体感。
+ */
 @Composable
 private fun defaultSegmentedColors(): ListItemColors = ListItemDefaults.segmentedColors(
     containerColor = colorScheme.surfaceBright,
@@ -88,6 +100,12 @@ private fun defaultSegmentedColors(): ListItemColors = ListItemDefaults.segmente
     supportingContentColor = colorScheme.onSurfaceVariant
 )
 
+/**
+ * 计算“孤立一项”的分段形状。
+ *
+ * 仅一项时四个角都应是大圆角，直接复用 `shapes.large`；
+ * 多项时交给 [ListItemDefaults.segmentedShapes] 按 index/count 区分首尾。
+ */
 @Composable
 private fun defaultSingleSegmentedShape(index: Int, count: Int): ListItemShapes {
     val base = ListItemDefaults.segmentedShapes(index, count)
@@ -98,6 +116,16 @@ private fun defaultSingleSegmentedShape(index: Int, count: Int): ListItemShapes 
     }
 }
 
+/**
+ * 静态列表版的分段容器。
+ *
+ * 调用方一次性传入已构造好的 Composable 列表，这里只负责按顺序套上
+ * 分组形状后纵向排列，不涉及显隐动画。
+ *
+ * @param visibleLen 实际可见的条目数；当部分条目被条件隐藏时用它保持
+ *   首尾圆角按完整数量计算。传 0 或负值则回退为 `content.size`，
+ *   否则尾部圆角会落在最后一个渲染项上，看起来像少画了半组。
+ */
 @Composable
 fun SegmentedColumn(
     modifier: Modifier = Modifier,
@@ -116,6 +144,7 @@ fun SegmentedColumn(
                 modifier = Modifier.padding(start = 16.dp, bottom = 8.dp)
             )
         }
+        // 2.dp 间距与 ListItemDefaults.SegmentedGap 对齐，保证静态版与动画版视觉一致
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             content.forEachIndexed { index, itemContent ->
                 CompositionLocalProvider(
@@ -131,16 +160,30 @@ fun SegmentedColumn(
     }
 }
 
+/**
+ * [SegmentedColumn] 的 DSL 作用域。
+ *
+ * 只负责收集条目而不立即组合，父容器因此可以先统计可见项、再统一计算
+ * 形状与动画，避免边组合边测量导致的布局抖动。
+ */
 @SegmentedColumnDsl
 class SegmentedColumnScope {
+    /** 单个条目：key 用于跨重组稳定动画状态，visible 控制展开/收起 */
     internal data class Entry(
         val key: Any?,
         val visible: Boolean,
         val content: @Composable () -> Unit,
     )
 
+    /** 条目按插入顺序保存，插入下标同时作为未指定 key 时的默认标识 */
     internal val entries = mutableListOf<Entry>()
 
+    /**
+     * 追加一个条目。
+     *
+     * key 为空时退化为插入下标；content 延迟到父容器组合时才执行，
+     * 所以这里可以安全地依据外部状态决定 visible。
+     */
     fun item(
         key: Any? = null,
         visible: Boolean = true,
@@ -150,6 +193,17 @@ class SegmentedColumnScope {
     }
 }
 
+/**
+ * DSL 版分段容器，支持条目显隐动画。
+ *
+ * 显隐由两套机制协同完成：
+ * 1. 每个条目维护独立的 0f..1f 进度，驱动 `graphicsLayer` 的矩形裁剪与透明度；
+ * 2. 自定义 [Layout] 只按“进度折算后的高度”堆叠，使下方条目平滑上移。
+ *
+ * 圆角与顶部间距跟着首尾可见项变化并做弹簧插值，因此增删条目时整组卡片
+ * 是连续变形而非瞬间重排；代价是每个条目都会产生一次动画帧回调，
+ * 列表很长时应避免把大量条目放进同一个分组。
+ */
 @Composable
 fun SegmentedColumn(
     modifier: Modifier = Modifier,
@@ -169,9 +223,11 @@ fun SegmentedColumn(
             )
         }
 
+        // Float 与 Dp 的 spring 泛型不同，必须各自实例化一份
         val floatSpring = spring<Float>(SegmentedSpringDamping, SegmentedSpringStiffness)
         val dpSpring = spring<Dp>(SegmentedSpringDamping, SegmentedSpringStiffness)
 
+        // 用 key 绑定动画状态；条目增删后即使下标变化，进度也不会错位到别的条目
         val progresses = entries.mapIndexed { index, entry ->
             key(entry.key ?: index) {
                 animateFloatAsState(
@@ -182,6 +238,7 @@ fun SegmentedColumn(
             }
         }
 
+        // 首尾可见项决定大圆角与零间距的归属；全部隐藏时退回首尾下标，避免 -1 参与插值
         val firstVisible = entries.indexOfFirst { it.visible }
         val lastVisible = entries.indexOfLast { it.visible }
 
@@ -192,6 +249,7 @@ fun SegmentedColumn(
                         val isFirst = if (firstVisible == -1) index == 0 else index == firstVisible
                         val isLast = if (lastVisible == -1) index == entries.lastIndex else index == lastVisible
 
+                        // 只有首项保留大圆角+零间距，其余项收成小圆角并让出 SegmentedGap
                         val topRadius by animateDpAsState(
                             if (isFirst) SegmentedOuterRadius else SegmentedInnerRadius,
                             dpSpring, label = "SegmentedTopRadius"
@@ -215,14 +273,17 @@ fun SegmentedColumn(
                                 .zIndex(if (entry.visible) (entries.size - index).toFloat() else -index.toFloat())
                                 .graphicsLayer {
                                     val progress = progresses[index].value.coerceAtLeast(0f)
+                                    // 用矩形裁剪模拟高度展开：进度增长时内容自上而下“露出”
                                     clip = true
                                     this.shape = object : Shape {
+                                        // 用“高度按进度缩放”的矩形做裁剪，等价于纵向展开动画
                                         override fun createOutline(
                                             size: Size,
                                             layoutDirection: LayoutDirection,
                                             density: Density,
                                         ): Outline = Outline.Rectangle(Rect(0f, 0f, size.width, size.height * progress))
                                     }
+                                    // 透明度乘 1.5 提前饱和（progress≈0.67 即全不透明），避免展开初期内容发灰
                                     alpha = (progress * 1.5f).coerceIn(0f, 1f)
                                 }
                         ) {
@@ -240,6 +301,7 @@ fun SegmentedColumn(
         ) { measurables, constraints ->
             val placeables = measurables.map { it.measure(constraints) }
             val positions = IntArray(placeables.size)
+            // 按进度累加高度：隐藏项贡献 0，因此不占位；整组总高可能为 0，需兜底
             var y = 0f
             placeables.forEachIndexed { index, placeable ->
                 positions[index] = y.roundToInt()
@@ -254,6 +316,12 @@ fun SegmentedColumn(
     }
 }
 
+/**
+ * 静态列表中的单个分段项。
+ *
+ * 按 index/count 计算自身应得的圆角；适合不参与显隐动画、
+ * 但仍需要与相邻项拼成一组的场景。
+ */
 @Composable
 fun SegmentedItem(
     index: Int,
@@ -267,6 +335,13 @@ fun SegmentedItem(
     }
 }
 
+/**
+ * 分段项的背景外壳。
+ *
+ * 形状来自 [LocalListItemShapes]，取不到时退回单段默认形状；
+ * 底色固定为 `surfaceBright`，与 [defaultSegmentedColors] 保持一致，
+ * 保证外壳与内部 ListItem 不会出现色差。
+ */
 @Composable
 fun SegmentedItemContainer(
     modifier: Modifier = Modifier,
@@ -284,6 +359,12 @@ fun SegmentedItemContainer(
     }
 }
 
+/**
+ * 可点击的分段列表项。
+ *
+ * 即使调用方没传 onClick 也传入空 lambda：Material3 的该重载据此启用
+ * 点击语义与按压反馈，若传 null 整行会失去可聚焦性，视觉上也点不动。
+ */
 @Composable
 fun SegmentedListItem(
     modifier: Modifier = Modifier,
@@ -315,6 +396,12 @@ fun SegmentedListItem(
     )
 }
 
+/**
+ * 带多选语义的分段列表项。
+ *
+ * 勾选由整行承载点击，`onLongClick` 只是附加操作，不参与选中判定；
+ * 适合“开关列表”这类需要 TalkBack 播报 checked 状态的场景。
+ */
 @Composable
 fun SegmentedListItem(
     checked: Boolean,
@@ -348,6 +435,12 @@ fun SegmentedListItem(
     )
 }
 
+/**
+ * 带“选中”语义的分段列表项。
+ *
+ * 与 checked 版本的区别在无障碍语义：这里暴露的是 selected，
+ * 用于一组互斥选项（如当前生效的配置项），点击必然伴随选中态切换。
+ */
 @Composable
 fun SegmentedListItem(
     selected: Boolean,
@@ -381,6 +474,13 @@ fun SegmentedListItem(
     )
 }
 
+/**
+ * 右侧带开关的分段列表项。
+ *
+ * 开关自身 `onCheckedChange = null`，点击完全交给整行处理，避免一次点击
+ * 触发两次回调；两者共用同一个 [MutableInteractionSource]，行高亮与
+ * 开关滑块的手势状态才能保持一致。
+ */
 @Composable
 fun SegmentedSwitchItem(
     icon: ImageVector? = null,
@@ -416,6 +516,13 @@ fun SegmentedSwitchItem(
     )
 }
 
+/**
+ * 右侧显示当前值、点击弹出下拉菜单的分段列表项。
+ *
+ * 菜单锚点取自手指按下的位置（[trackPressPosition]），因此气泡会贴着触点
+ * 展开而不是固定从行首弹出。`safeIndex` 对越界下标做了钳制，`items`
+ * 为空时用 -1 作哨兵，防止数据刷新瞬间读取到非法下标。
+ */
 @Composable
 fun SegmentedDropdownItem(
     icon: ImageVector? = null,
@@ -430,8 +537,10 @@ fun SegmentedDropdownItem(
 ) {
     val haptic = LocalHapticFeedback.current
     var expanded by remember { mutableStateOf(false) }
+    // 记录按下的触点，供 OffsetAnchoredExpressiveMenu 定位气泡
     var anchorOffset by remember { mutableStateOf(IntOffset.Zero) }
 
+    // items 为空时不能访问 items[safeIndex]，这里用 -1 表示“无有效选中项”
     val hasItems = items.isNotEmpty()
     val safeIndex = if (hasItems) {
         selectedIndex.coerceIn(0, items.lastIndex)
@@ -492,6 +601,12 @@ fun SegmentedDropdownItem(
     }
 }
 
+/**
+ * 左侧带单选按钮的分段列表项。
+ *
+ * RadioButton 自身不接收点击（`onClick = null`），点击与触感反馈统一由
+ * 整行处理，这样点击文字或留白区域也能完成选择，触控热区更大。
+ */
 @Composable
 fun SegmentedRadioItem(
     title: String,
@@ -523,6 +638,13 @@ fun SegmentedRadioItem(
     )
 }
 
+/**
+ * 左侧带复选框的分段列表项。
+ *
+ * 复选框与整行共用 [MutableInteractionSource]，点击任一处都只回调一次
+ * `onCheckedChange`，同时按压高亮会同时出现在行背景与选框上，
+ * 不会出现“点了选框但行没反应”的割裂感。
+ */
 @Composable
 fun SegmentedCheckboxItem(
     title: String,
@@ -558,6 +680,14 @@ fun SegmentedCheckboxItem(
     )
 }
 
+/**
+ * 内嵌输入框的分段列表项。
+ *
+ * 点击整行请求焦点；输入框获得焦点后通过 [BringIntoViewRequester] 把自身
+ * 滚入可视区，避免被弹出的输入法遮住。文字样式强制对齐 bodyMedium 的
+ * 字号/行高，保证多行输入时行距仍与支持文本一致；占位符使用
+ * supportingContentColor，防止默认前景色在浅色卡片上对比度不足。
+ */
 @Composable
 fun SegmentedTextField(
     modifier: Modifier = Modifier,
@@ -583,8 +713,10 @@ fun SegmentedTextField(
     supportingContent: @Composable (() -> Unit)? = null,
     isError: Boolean = false
 ) {
+    // 焦点落到输入框时把整行滚进可视区，输入法弹出后仍能看到正在编辑的内容
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
     val coroutineScope = rememberCoroutineScope()
+    // 行点击与输入框共用同一个 FocusRequester，点行内空白也能聚焦
     val focusRequester = remember { FocusRequester() }
 
     SegmentedListItem(

@@ -30,6 +30,10 @@ import me.weishu.kernelsu.Natives
 import me.weishu.kernelsu.R
 import me.weishu.kernelsu.ui.LocalMainPagerState
 
+/**
+ * Material 风格的短导航栏。仅在完整功能版本下显示（非 full-featured 直接不渲染），
+ * 页面切换统一走 [MainPagerState.animateToPage]，避免与 Pager 手势状态冲突。
+ */
 @Composable
 fun BottomBarMaterial(navigationBadge: NavigationBadgeState) {
     val fullFeatured = Natives.isFullFeatured()
@@ -37,6 +41,7 @@ fun BottomBarMaterial(navigationBadge: NavigationBadgeState) {
 
     val mainPagerState = LocalMainPagerState.current
 
+    // 固定四页：首页/超级用户/模块/设置；顺序必须与 Pager 页序一致
     val items = listOf(
         Triple(R.string.home, Icons.Filled.Home, Icons.Outlined.Home),
         Triple(R.string.superuser, Icons.Filled.Shield, Icons.Outlined.Shield),
@@ -46,6 +51,7 @@ fun BottomBarMaterial(navigationBadge: NavigationBadgeState) {
 
     ShortNavigationBar(
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        // 水平方向处理刘海，底部处理系统手势条，避免内容被遮挡
         windowInsets = WindowInsets.systemBars.union(WindowInsets.displayCutout).only(
             WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom
         )
@@ -55,6 +61,7 @@ fun BottomBarMaterial(navigationBadge: NavigationBadgeState) {
             ShortNavigationBarItem(
                 selected = selected,
                 onClick = {
+                    // 已选中则忽略，避免重复触发滚动动画
                     if (!selected) {
                         mainPagerState.animateToPage(index)
                     }
@@ -78,6 +85,9 @@ fun BottomBarMaterial(navigationBadge: NavigationBadgeState) {
     }
 }
 
+/**
+ * 带角标的导航图标。[badge] 为空时不包 BadgedBox，减少无意义的布局层级。
+ */
 @Composable
 internal fun NavigationIconWithBadge(
     icon: ImageVector,
@@ -88,10 +98,12 @@ internal fun NavigationIconWithBadge(
         BadgedBox(
             badge = {
                 when (badge.tone) {
+                    // Alert 用默认错误色，强调需要处理
                     BadgeTone.Alert -> Badge {
                         Text(badge.count.toString())
                     }
 
+                    // Accent 用主色，仅作提示
                     BadgeTone.Accent -> Badge(
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary,

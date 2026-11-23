@@ -17,10 +17,18 @@ import me.weishu.kernelsu.data.registry.canShareDownload
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * 全局下载状态中心：维护进行中/已完成的下载，并转发给 [DownloadService]。
+ *
+ * 真正的网络与落盘由前台 Service 执行；这里只保存可观察状态和完成回调，
+ * 避免 Activity/Compose 重建时丢失下载进度。
+ */
 object DownloadManager {
 
+    /** 下载生命周期状态。 */
     enum class Status { PENDING, DOWNLOADING, COMPLETED, FAILED }
 
+    /** 单个下载任务的快照，供 UI 与回调读取。 */
     data class DownloadState(
         val id: Int,
         val fileName: String,
@@ -38,13 +46,22 @@ object DownloadManager {
         val expected: ExpectedFile? = null,
     )
 
+    // 单调递增的下载 id，也用作通知 id 的一部分。
     private val idCounter = AtomicInteger(0)
     private val _downloads = MutableStateFlow<Map<Int, DownloadState>>(emptyMap())
+    // 对外只暴露只读流，防止外部直接改写状态。
     val downloads: StateFlow<Map<Int, DownloadState>> = _downloads.asStateFlow()
 
+    // 同一个 id 可能被多次订阅，用 merge 合并回调。
     private val completionCallbacks = ConcurrentHashMap<Int, (Uri) -> Unit>()
+    // 完成回调统一切到主线程，UI 可以安全更新。
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /**
+     * 登记一个由调用方自行写盘的“本地保存”任务（如 WebUI 生成的 blob）。
+     *
+     * 这类任务不经过 DownloadService，仅复用状态流与完成通知。
+     */
     internal fun registerLocalSave(
         fileName: String,
         targetPath: String? = null,
@@ -64,6 +81,12 @@ object DownloadManager {
         return id
     }
 
+    /**
+     * 入队一个下载任务并启动前台 Service。
+     *
+     * 若已有参数完全一致且仍在进行的任务则复用它，避免重复下载；
+     * 带 [expected] 的仓库下载会先做 URL 白名单校验，防止任意地址绕过校验。
+     */
     fun enqueue(
         context: Context,
         url: String,
@@ -111,6 +134,7 @@ object DownloadManager {
         )
         _downloads.update { it + (id to state) }
 
+        // 仓库下载必须来自允许的 Release 地址，否则直接标记失败。
         if (expected != null && !RegistryUrls.isAllowedReleaseDownloadUrl(url)) {
             markFailed(id, "Download URL not allowed", DownloadVerificationException.Reason.URL_NOT_ALLOWED)
             return id
@@ -120,6 +144,7 @@ object DownloadManager {
             completionCallbacks[id] = onCompleted
         }
 
+        // 通过显式 Intent 启动服务，避免被外部应用劫持。
         val intent = Intent(context, DownloadService::class.java).apply {
             action = DownloadService.ACTION_DOWNLOAD
             putExtra(DownloadService.EXTRA_DOWNLOAD_ID, id)
@@ -140,6 +165,7 @@ object DownloadManager {
         return id
     }
 
+    // 更新进度并自动转为 DOWNLOADING；未知 id 直接忽略。
     internal fun updateProgress(id: Int, progress: Int) {
         _downloads.update { map ->
             val state = map[id] ?: return@update map
@@ -147,6 +173,7 @@ object DownloadManager {
         }
     }
 
+    // 标记完成、进度置 100，并在主线程派发一次性完成回调。
     internal fun markCompleted(id: Int, uri: Uri) {
         _downloads.update { map ->
             val state = map[id] ?: return@update map
@@ -159,6 +186,9 @@ object DownloadManager {
         }
     }
 
+    /**
+     * 标记失败并丢弃完成回调；[verificationFailure] 用于区分 URL/大小/哈希校验失败。
+     */
     internal fun markFailed(
         id: Int,
         error: String,

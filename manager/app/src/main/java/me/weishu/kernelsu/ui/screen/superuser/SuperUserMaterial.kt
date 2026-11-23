@@ -74,6 +74,10 @@ import me.weishu.kernelsu.ui.component.statustag.StatusTag
 import me.weishu.kernelsu.ui.util.ownerNameForUid
 import me.weishu.kernelsu.ui.viewmodel.AppSortType
 
+/**
+ * Material 3 主题下的超级用户列表：支持搜索、排序、过滤、
+ * 下拉刷新以及按 UID 展开多应用分组。
+ */
 @Composable
 fun SuperUserPagerMaterial(
     uiState: SuperUserUiState,
@@ -81,12 +85,15 @@ fun SuperUserPagerMaterial(
     bottomInnerPadding: Dp,
 ) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
+    // 主列表与搜索列表分离，避免搜索时丢失主列表滚动位置
     val listState = rememberLazyListState()
     val searchListState = rememberLazyListState()
+    // 自增计数用于触发 ScrollToTopOnChange，即使数据引用未变也能响应手动刷新
     val refreshTick = remember { mutableIntStateOf(0) }
     val pullToRefreshState = rememberPullToRefreshState()
 
     var localSearchText by remember { mutableStateOf(uiState.searchStatus.searchText) }
+    // ViewModel 侧搜索文本变化（如清空）时回灌本地输入框
     LaunchedEffect(uiState.searchStatus.searchText) {
         localSearchText = uiState.searchStatus.searchText
     }
@@ -129,6 +136,7 @@ fun SuperUserPagerMaterial(
                             expanded = showSortMenu,
                             onDismissRequest = { showSortMenu = false }
                         ) {
+                            // 排序字段与“反向排序”共用同一配置对象，修改后立即重排列表
                             val sortEntries = listOf(
                                 AppSortType.NAME to R.string.sort_by_name,
                                 AppSortType.PACKAGE_NAME to R.string.sort_by_package_name,
@@ -201,6 +209,7 @@ fun SuperUserPagerMaterial(
                             expanded = showDropdown,
                             onDismissRequest = { showDropdown = false }
                         ) {
+                            // 仅多用户设备才展示“仅主用户应用”，groupShape 需要真实条目数
                             val filterCount = if (uiState.userIds.size > 1) 2 else 1
                             DropdownMenuGroup(shapes = MenuDefaults.groupShapes()) {
                                 CheckableDropdownMenuItem(
@@ -245,6 +254,7 @@ fun SuperUserPagerMaterial(
                 },
                 scrollBehavior = scrollBehavior,
                 defaultContent = { bottomPadding, closeSearch ->
+                    // 搜索词变化时回到列表顶部，避免停留在旧结果位置
                     LaunchedEffect(localSearchText) {
                         searchListState.scrollToItem(0)
                     }
@@ -329,6 +339,7 @@ fun SuperUserPagerMaterial(
                 )
             },
         ) {
+            // 记录已展开的 UID；分组折叠状态不进入 ViewModel，属于纯 UI 状态
             val expandedSearchUids = remember { mutableStateOf(setOf<Int>()) }
 
             val latestGroupedApps = rememberUpdatedState(uiState.groupedApps)
@@ -357,6 +368,7 @@ fun SuperUserPagerMaterial(
             ) {
                 itemsIndexed(uiState.groupedApps, key = { _, item -> item.uid }) { index, group ->
                     val expanded = expandedSearchUids.value.contains(group.uid)
+                    // 单应用分组没有可展开内容，长按不改变状态
                     val onToggleExpand = {
                         if (group.apps.size > 1) {
                             expandedSearchUids.value = if (expandedSearchUids.value.contains(group.uid)) {
@@ -396,6 +408,10 @@ fun SuperUserPagerMaterial(
     }
 }
 
+/**
+ * 搜索结果里的分组项：点击分组关闭搜索并进入授权详情，
+ * 多应用分组会直接展开并高亮命中的包。
+ */
 @Composable
 private fun SearchGroupItem(
     group: GroupedApps,
@@ -431,6 +447,7 @@ private fun SearchGroupItem(
     }
 }
 
+/** 分组内单个应用行；[matched] 为 true 时用不同的容器色标记搜索命中。 */
 @Composable
 private fun SimpleAppItem(
     app: AppInfo,
@@ -468,6 +485,10 @@ private fun SimpleAppItem(
     )
 }
 
+/**
+ * UID 分组行：展示主应用图标与 ROOT/UMOUNT/CUSTOM/USER 标签。
+ * 长按多应用分组可展开，点击进入该 UID 的授权详情。
+ */
 @Composable
 private fun GroupItem(
     group: GroupedApps,
@@ -484,6 +505,7 @@ private fun GroupItem(
     val otherBg = colorScheme.tertiary
     val otherFg = colorScheme.onTertiary
 
+    // Android 多用户 UID 按 userId * 100000 偏移，userId 非 0 时需额外标注
     val userId = group.uid / 100000
     val tags = remember(group.anyAllowSu, group.shouldUmount, group.anyCustom, userId) {
         buildList {
@@ -493,6 +515,7 @@ private fun GroupItem(
             if (userId != 0) add(StatusMeta("USER $userId", otherBg, otherFg))
         }
     }
+    // 多应用分组用“包含 N 个应用”替代单一包名，避免误导
     val summaryText = if (group.apps.size > 1) {
         stringResource(R.string.group_contains_apps, group.apps.size)
     } else {

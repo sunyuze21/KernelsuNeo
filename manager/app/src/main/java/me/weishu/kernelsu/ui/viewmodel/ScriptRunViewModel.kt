@@ -27,16 +27,21 @@ import me.weishu.kernelsu.ui.util.removeAsRoot
 import me.weishu.kernelsu.ui.util.runOneshotScript
 import java.util.UUID
 
+// 中文说明：一次性脚本运行页 ViewModel，负责解压准备、参数校验、执行与清理。
+// 脚本解压在仓库层有引用计数，页面真正离开时必须释放，否则临时目录会残留（脚本以 root 运行，可能产生 root 拥有的文件）。
 /** Prepares a one-shot script, collects its parameters and runs it once. */
 class ScriptRunViewModel : ViewModel() {
 
     private val _state = MutableStateFlow(ScriptRunUiState())
+    // 对外只读的脚本运行状态，阶段推进只能由本类内部触发
     val state: StateFlow<ScriptRunUiState> = _state.asStateFlow()
 
     /** Full stdout + stderr, for "save log". */
     val logContent = StringBuilder()
 
+    // 当前页面访问标识；用于区分"旋转重建"与"重新进入页面"
     private var visit: String? = null
+    // 准备阶段任务，取消时需同时释放仓库层解压
     private var prepareJob: Job? = null
 
     /** Token of the current preparation, owning its extraction in [ScriptRepository]. */
@@ -46,10 +51,14 @@ class ScriptRunViewModel : ViewModel() {
     /**
      * Prepares [arg] once per page visit ([visit] survives configuration changes, so a
      * finished run stays on screen after a rotation but a new visit starts over).
+     *
+     * 中文说明：同一 visit 重复调用是幂等的；正在运行时拒绝重新准备，
+     * 避免覆盖用户正在查看的输出。
      */
     fun load(arg: ScriptRunArg, visit: String) {
         if (this.visit == visit || _state.value.phase == ScriptRunPhase.RUNNING) return
         this.visit = visit
+        // 输出缓冲区跨线程写入，需与 onStdout 回调保持同步
         synchronized(logContent) { logContent.setLength(0) }
         _state.value = ScriptRunUiState(displayName = arg.displayName, offerInstall = arg.offerInstall)
         releaseExtraction()
@@ -60,6 +69,7 @@ class ScriptRunViewModel : ViewModel() {
                 .onSuccess { prepared ->
                     // Superseded or left: releaseExtraction() already released this token.
                     if (owner != token) return@onSuccess
+                    // 参数默认值直接用于首次校验，使"必填未填"能在进入页面时就提示
                     val values = prepared.params.defaults
                     val lastRun = withContext(Dispatchers.IO) { ScriptRepository.history.last(prepared.manifest.id) }
                     _state.update {
@@ -73,6 +83,7 @@ class ScriptRunViewModel : ViewModel() {
                     }
                 }
                 .onFailure { e ->
+                    // 取消属于正常流程（页面离开/被新请求取代），不能当作失败展示
                     if (e is CancellationException) throw e
                     if (e is ReleasedException || owner != token) return@onFailure
                     Log.w(TAG, "cannot prepare script ${arg.uri}", e)
@@ -81,6 +92,11 @@ class ScriptRunViewModel : ViewModel() {
         }
     }
 
+    /**
+     * 更新单个参数值并重新校验。
+     *
+     * 仅在 READY 阶段生效，防止运行中修改参数导致展示与实际执行不一致。
+     */
     fun setValue(key: String, value: String) {
         _state.update { s ->
             val prepared = s.prepared ?: return@update s
@@ -90,6 +106,12 @@ class ScriptRunViewModel : ViewModel() {
         }
     }
 
+    /**
+     * 构建命令并执行脚本。
+     *
+     * 执行前会再次校验参数；结束后记录运行历史、以 root 删除临时目录并释放解压引用，
+     * 无论脚本是否成功都要完成清理，避免残留。
+     */
     fun run() {
         val current = _state.value
         val prepared = current.prepared ?: return
@@ -102,11 +124,13 @@ class ScriptRunViewModel : ViewModel() {
                 ScriptCommand.environment(ScriptRepository.hostInfo(), prepared.manifest.id, dir, prepared.params, current.values),
             )
         } catch (e: IllegalArgumentException) {
+            // 参数非法时保持页面状态不变，由参数错误提示引导用户修正
             Log.w(TAG, "invalid parameters", e)
             return
         }
         _state.update { it.copy(phase = ScriptRunPhase.RUNNING, output = "") }
         viewModelScope.launch {
+            // 累积的可见输出；ANSI 清屏序列到来时重置，模拟终端的清屏行为
             var text = ""
             val exitCode = withContext(Dispatchers.IO) {
                 val code = runOneshotScript(
@@ -122,6 +146,7 @@ class ScriptRunViewModel : ViewModel() {
                         synchronized(logContent) { logContent.append(line).append('\n') }
                     },
                     onStderr = { line ->
+                        // 错误流不进入可见区域，但仍需写入日志以便排查
                         synchronized(logContent) { logContent.append(line).append('\n') }
                     },
                 )
@@ -147,6 +172,8 @@ class ScriptRunViewModel : ViewModel() {
     /**
      * The page is gone (not just recreated): drop the extraction and start over on the next
      * visit. A running script cleans up when it ends, even after the page is gone.
+     *
+     * 中文说明：运行中不清理，交给执行协程结束时自行释放，避免删除脚本正在使用的目录。
      */
     fun leave() {
         if (_state.value.phase == ScriptRunPhase.RUNNING) return
@@ -155,6 +182,11 @@ class ScriptRunViewModel : ViewModel() {
         _state.value = ScriptRunUiState()
     }
 
+    /**
+     * 取消准备任务并释放当前占用的解压 token。
+     *
+     * owner 置空可让仍在回调中的旧请求识别出自己已被取代。
+     */
     private fun releaseExtraction() {
         prepareJob?.cancel()
         prepareJob = null
@@ -162,10 +194,16 @@ class ScriptRunViewModel : ViewModel() {
         owner = null
     }
 
+    /**
+     * ViewModel 销毁时兜底释放解压；运行中的任务仍由其协程负责清理。
+     */
     override fun onCleared() {
         if (_state.value.phase != ScriptRunPhase.RUNNING) releaseExtraction()
     }
 
+    /**
+     * 把各类脚本异常翻译成用户可读文案，未知异常退化为通用提示。
+     */
     private fun errorMessage(e: Throwable): String {
         val res = ksuApp.resources
         return when (e) {
@@ -189,6 +227,7 @@ class ScriptRunViewModel : ViewModel() {
     }
 
     private companion object {
+        // 日志标签，脚本准备与参数错误都带上它
         const val TAG = "ScriptRunViewModel"
     }
 }

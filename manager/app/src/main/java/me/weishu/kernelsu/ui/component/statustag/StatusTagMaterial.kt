@@ -11,6 +11,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
+/**
+ * Material 版状态标签：小圆角底色 + 紧凑文字，末尾留 4dp 以便与后续内容分隔。
+ */
 @Composable
 fun StatusTagMaterial(
     label: String,

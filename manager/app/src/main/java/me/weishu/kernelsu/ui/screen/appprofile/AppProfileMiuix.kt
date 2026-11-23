@@ -91,11 +91,13 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
  * @author weishu
  * @date 2023/5/16.
  */
+// 应用 profile 的 Miuix 布局：与 Material 版本共享状态和动作，只在组件与视觉上不同。
 @Composable
 fun AppProfileScreenMiuix(
     state: AppProfileUiState,
     actions: AppProfileActions,
 ) {
+    // 模糊背景依赖运行时着色器；不支持时 backdrop 为空，顶栏退化为纯色。
     val enableBlur = LocalEnableBlur.current
     val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop(enableBlur)
@@ -105,8 +107,10 @@ fun AppProfileScreenMiuix(
         topBar = {
             TopBar(
                 onBack = actions.onBack,
+                // 共享 uid 或 WebView zygote 没有明确的单一应用可操作。
                 showActions = !state.isUidGroup && !state.appGroup.primary.isWebViewZygote,
                 packageName = state.packageName,
+                // Android 多用户 uid 编码为 userId * 100000 + appId。
                 userId = state.uid / 100000,
                 onLaunchApp = actions.onLaunchApp,
                 onForceStopApp = actions.onForceStopApp,
@@ -132,6 +136,7 @@ fun AppProfileScreenMiuix(
             ) {
                 item {
                     AppProfileInner(
+                        // 共享 uid 时没有单一包名，改用组名与受影响应用列表展示。
                         packageName = if (state.isUidGroup) {
                             ""
                         } else {
@@ -146,6 +151,7 @@ fun AppProfileScreenMiuix(
                             )
                         },
                         appUid = state.uid,
+                        // 共享 uid 时才展示 sharedUserId 提示。
                         sharedUserId = if (state.isUidGroup) state.sharedUserId else "",
                         appVersionName = if (state.isUidGroup) "" else (state.appGroup.primary.packageInfo.versionName ?: ""),
                         appVersionCode = if (state.isUidGroup) 0L else state.appGroup.primary.packageInfo.longVersionCode,
@@ -159,6 +165,7 @@ fun AppProfileScreenMiuix(
                     )
                     Spacer(
                         Modifier.height(
+                            // 同时补偿导航栏与 caption bar，避免最后一项被系统手势条遮挡。
                             WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() +
                                     WindowInsets.captionBar.asPaddingValues().calculateBottomPadding()
                         )
@@ -169,6 +176,10 @@ fun AppProfileScreenMiuix(
     }
 }
 
+/**
+ * 应用 profile 的主体内容：应用信息、root 开关和策略编辑区。
+ * 是否展示 root 策略完全由 [isSpecialApp] 与 [Natives.Profile.allowSu] 决定。
+ */
 @Composable
 private fun AppProfileInner(
     modifier: Modifier = Modifier,
@@ -187,9 +198,12 @@ private fun AppProfileInner(
     onManageTemplate: () -> Unit = {},
     onProfileChange: (Natives.Profile) -> Unit,
 ) {
+    // 特殊应用（如 shell、system）不能通过此页授予 root。
     val isRootGranted = !isSpecialApp && profile.allowSu
+    // Android 多用户 uid 编码：userId * 100000 + appId。
     val userId = appUid / 100000
     val appId = appUid % 100000
+    // 模板列表用于 Template 模式下选择与回显。
     val templates = remember { listAppProfileTemplates() }
 
     Column(
@@ -282,6 +296,7 @@ private fun AppProfileInner(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     if (userId != 0) {
+                        // 非主用户时同时展示 userId 与 appId，避免只看 appId 产生歧义。
                         StatusTag(
                             label = "USER $userId",
                             backgroundColor = colorScheme.primary.copy(alpha = 0.8f),
@@ -326,6 +341,7 @@ private fun AppProfileInner(
             }
         }
 
+        // 模板优先于自定义：rootUseDefault 为 true 时跟随默认策略。
         val initialRootMode = if (profile.rootUseDefault) {
             Mode.Default
         } else if (profile.rootTemplate != null) {
@@ -333,15 +349,19 @@ private fun AppProfileInner(
         } else {
             Mode.Custom
         }
+        // 本地模式仅初始化一次，后续由 profile 回调驱动。
         var rootMode by rememberSaveable {
             mutableStateOf(initialRootMode)
         }
+        // 非 root 只有默认与自定义两种状态，没有模板概念。
         val nonRootMode = if (profile.nonRootUseDefault) Mode.Default else Mode.Custom
         val dropdownMode = if (isRootGranted) rootMode else nonRootMode
+        // 切换 root 模式；Template 需要同时写入模板的 uid/gid/能力集。
         ProfileBox(dropdownMode, isRootGranted) { mode ->
             if (isRootGranted) {
                 when (mode) {
                     Mode.Default, Mode.Custom -> {
+                        // 选择默认或自定义都会清空已绑定的模板。
                         onProfileChange(
                             profile.copy(
                                 rootUseDefault = mode == Mode.Default,
@@ -353,9 +373,11 @@ private fun AppProfileInner(
 
                     Mode.Template -> {
                         if (templates.isNotEmpty()) {
+                            // 默认选中当前模板，没有则取第一个可用模板。
                             val selected = profile.rootTemplate ?: templates[0]
                             val info = me.weishu.kernelsu.ui.viewmodel.getTemplateInfoById(selected)
                             if (info != null && setSepolicy(selected, info.rules.joinToString("\n"))) {
+                                // 模板不仅改 SELinux 规则，还会覆盖 uid/gid、附加组和能力集。
                                 onProfileChange(
                                     profile.copy(
                                         rootUseDefault = false,
@@ -369,6 +391,7 @@ private fun AppProfileInner(
                                     )
                                 )
                             } else if (profile.rootTemplate != selected || profile.rootUseDefault) {
+                                // 写 SELinux 规则失败时只记录模板 id，避免把不完整策略落盘。
                                 onProfileChange(
                                     profile.copy(
                                         rootUseDefault = false,
@@ -386,6 +409,7 @@ private fun AppProfileInner(
         }
         Spacer(Modifier.height(12.dp))
 
+        // root 与普通应用使用不同配置组件，避免展示无关字段。
         AnimatedVisibility(
             visible = isRootGranted,
             enter = fadeIn() + expandVertically(),
@@ -397,6 +421,7 @@ private fun AppProfileInner(
                     .padding(horizontal = 12.dp)
                     .padding(bottom = if (rootMode != Mode.Default) 12.dp else 0.dp),
             ) {
+                // 模板模式需要展示模板选择与查看入口。
                 AnimatedVisibility(
                     visible = rootMode == Mode.Template,
                     enter = fadeIn() + expandVertically(),
@@ -409,6 +434,7 @@ private fun AppProfileInner(
                         onProfileChange = onProfileChange
                     )
                 }
+                // 自定义模式才允许编辑底层字段。
                 AnimatedVisibility(
                     visible = rootMode == Mode.Custom,
                     enter = fadeIn() + expandVertically(),
@@ -428,6 +454,7 @@ private fun AppProfileInner(
             enter = fadeIn() + expandVertically(),
             exit = fadeOut() + shrinkVertically()
         ) {
+            // 未授权 root 时只展示应用级配置，不展示 uid/gid 等 root 字段。
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -450,6 +477,7 @@ private fun AppProfileInner(
         }
 
         if (isUidGroup) {
+            // 共享 uid 时列出所有受影响应用，提醒用户策略是整组生效的。
             SmallTitle(
                 text = stringResource(R.string.app_profile_affects_following_apps),
                 modifier = Modifier.padding(top = 4.dp)
@@ -483,6 +511,10 @@ private fun AppProfileInner(
     }
 }
 
+/**
+ * 应用 profile 顶栏：在支持模糊时叠加 backdrop，并在普通单应用下展示更多菜单。
+ * 菜单里的启动/停止/重启都需要包名与 userId。
+ */
 @Composable
 private fun TopBar(
     onBack: () -> Unit,
@@ -507,6 +539,7 @@ private fun TopBar(
                     val layoutDirection = LocalLayoutDirection.current
                     Icon(
                         modifier = Modifier.graphicsLayer {
+                            // RTL 语言下把返回箭头水平翻转。
                             if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
                         },
                         imageVector = MiuixIcons.Back,
@@ -535,6 +568,7 @@ private fun TopBar(
                         onDismissRequest = { showTopPopup.value = false },
                         content = {
                             ListPopupColumn {
+                                // 三个动作都针对同一 uid 下的应用实例。
                                 val items = listOf(
                                     stringResource(id = R.string.launch_app),
                                     stringResource(id = R.string.force_stop_app),
@@ -566,6 +600,10 @@ private fun TopBar(
     }
 }
 
+/**
+ * root/非 root 策略模式选择器（Miuix 下拉形式）。
+ * Template 只在已有可用模板时加入列表，避免用户选到空模板。
+ */
 @Composable
 private fun ProfileBox(
     mode: Mode,
@@ -575,6 +613,7 @@ private fun ProfileBox(
     val defaultText = stringResource(R.string.profile_default)
     val templateText = stringResource(R.string.profile_template)
     val customText = stringResource(R.string.profile_custom)
+    // 下拉展示文案与 Mode 的对应关系单独维护，保证顺序一致。
     val list =
         remember(hasTemplate, defaultText, templateText, customText) {
             buildList {
@@ -595,6 +634,7 @@ private fun ProfileBox(
             add(Mode.Custom to customText)
         }
     }
+    // 找不到对应项时回退到第一项，避免下拉越界。
     val selectedIndex = modesAndTitles.indexOfFirst { it.first == mode }
     Card(
         modifier = Modifier

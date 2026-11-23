@@ -17,15 +17,21 @@ import java.util.concurrent.TimeUnit
 /**
  * Handles blob downloads by spooling chunks to a temporary file before WebView
  * requests the generated internal URL.
+ *
+ * 说明：WebUI 的 JS 通过桥接分块写入 Base64，再让 WebView 访问内部 https
+ * 地址触发下载；分块与临时文件都只在应用缓存中，完成后立即删除。
  */
 object BlobDownloadHandler {
+    // 仅用于内部拦截的虚拟域名，不解析到真实网络。
     private const val BLOB_DOWNLOAD_HOST = "blob-download.kernelsu.internal"
+    // 超过 5 分钟未完成的分块下载视为废弃，防止缓存泄漏。
     private const val STALE_THRESHOLD_MS = 5 * 60 * 1000L
 
     private val pendingDownloads = ConcurrentHashMap<String, PendingDownload>()
     @Volatile
     private var lastCleanupTime = System.currentTimeMillis()
 
+    /** 一个进行中的分块下载：临时文件、输出流与完成标记。 */
     private data class PendingDownload(
         val fileName: String,
         val mimeType: String?,
@@ -36,8 +42,11 @@ object BlobDownloadHandler {
     )
 
     /** Register a new blob download session and return its internal URL. */
+    // 说明：返回的 URL 只在本次会话内有效，下载完成后由拦截器读取临时文件。
     fun registerBlobDownload(fileName: String, mimeType: String?, cacheDir: File): String {
+        // 随机 id 同时作为 URL 路径，避免不同 WebUI 之间互相覆盖。
         val downloadId = UUID.randomUUID().toString()
+        // 必须落在应用缓存目录，避免占用用户存储。
         val tempFile = File.createTempFile("ksu-blob-", ".download", cacheDir)
         pendingDownloads[downloadId] = PendingDownload(
             fileName = fileName,
@@ -56,6 +65,7 @@ object BlobDownloadHandler {
     }
 
     /** Write one base64 encoded chunk to the session. */
+    // 说明：分块可能来自 JS 的多线程回调，写入需按会话加锁。
     fun writeChunk(downloadId: String, base64Chunk: String): Boolean {
         val download = pendingDownloads[downloadId] ?: return false
         return try {
@@ -72,6 +82,7 @@ object BlobDownloadHandler {
     }
 
     /** Mark the download complete and make the spooled file available to WebView. */
+    // 完成后不再接受写入，并关闭输出流保证数据落盘。
     fun completeDownload(downloadId: String): Boolean {
         val download = pendingDownloads[downloadId] ?: return false
         return try {
@@ -89,9 +100,11 @@ object BlobDownloadHandler {
         }
     }
 
+    // 取消即关闭并删除临时文件。
     fun cancelDownload(downloadId: String) = closeDownload(downloadId)
 
     /** Intercept requests to the internal blob URL and serve the completed file. */
+    // 说明：只拦截内部虚拟域名；其他请求返回 null 交给后续处理器。
     fun shouldInterceptRequest(request: WebResourceRequest): WebResourceResponse? {
         val url = request.url
         if (url.scheme != "https" || url.host != BLOB_DOWNLOAD_HOST) return null
@@ -108,8 +121,10 @@ object BlobDownloadHandler {
         }
 
         return WebResourceResponse(
+            // 未提供 MIME 时回退为二进制流，避免浏览器按文本渲染。
             download.mimeType ?: "application/octet-stream",
             null,
+            // 流关闭后自动清理临时文件。
             CleanupInputStream(input) { closeDownload(downloadId) },
         ).apply {
             responseHeaders = mapOf(
@@ -119,6 +134,7 @@ object BlobDownloadHandler {
         }
     }
 
+    // 从注册表移除并尽力关闭流、删除临时文件；所有异常都吞掉，清理不能影响主流程。
     private fun closeDownload(downloadId: String) {
         pendingDownloads.remove(downloadId)?.let { download ->
             runCatching { download.outputStream.close() }
@@ -126,6 +142,7 @@ object BlobDownloadHandler {
         }
     }
 
+    // 构造 404 文本响应；WebView 拦截失败时给 JS 一个明确错误。
     private fun createErrorResponse(message: String) = WebResourceResponse(
         "text/plain",
         "utf-8",
@@ -135,6 +152,7 @@ object BlobDownloadHandler {
         ByteArrayInputStream(message.toByteArray(Charsets.UTF_8)),
     )
 
+    // 清理超过 5 分钟仍未完成的会话，避免 JS 异常退出后临时文件长期残留。
     private fun cleanupStaleDownloads() {
         val now = System.currentTimeMillis()
         val staleIds = pendingDownloads.entries
@@ -146,12 +164,15 @@ object BlobDownloadHandler {
         }
     }
 
+    // WebUI 销毁时清空所有会话。
     fun cleanup() = pendingDownloads.keys.toList().forEach(::closeDownload)
 
+    /** 在流关闭时触发一次清理回调，确保临时文件不会泄漏。 */
     private class CleanupInputStream(
         input: InputStream,
         private val onClose: () -> Unit,
     ) : FilterInputStream(input) {
+        // 关闭底层流后触发清理，确保临时文件随响应结束删除。
         override fun close() {
             runCatching { super.close() }
             onClose()

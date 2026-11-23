@@ -15,15 +15,21 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * @author rifsxd
  * @date 2025/6/2.
+ *
+ * 把原生主题色导出为 CSS 变量，注入 WebUI 后让网页配色跟随应用主题。
+ * Miuix 与 Material 两套色板字段不同，分别生成。
  */
 object MonetColorsProvider {
 
+    // 原子引用保存最新 CSS，Service/WebView 侧可无锁读取。
     private val colorsCss: AtomicReference<String?> = AtomicReference(null)
 
+    /** 返回当前主题对应的 CSS 变量文本；尚未初始化时返回空串。 */
     fun getColorsCss(): String {
         return colorsCss.get() ?: ""
     }
 
+    /** 根据当前 UI 模式刷新 CSS 变量；Compose 重组时自动调用。 */
     @Composable
     fun UpdateCss(materialColorScheme: ColorScheme? = null) {
         when (LocalUiMode.current) {
@@ -32,11 +38,14 @@ object MonetColorsProvider {
         }
     }
 
+    // Miuix 主题：字段名沿用 Material 命名，供网页端统一使用。
     @Composable
     private fun UpdateCssMiuix() {
         val colorScheme = MiuixTheme.colorScheme
 
+        // 主题色变化时重新生成 CSS；协程取消由 Compose 管理。
         LaunchedEffect(colorScheme) {
+            // key 与 Material 的 ColorScheme 字段保持同名，方便 WebUI 统一引用。
             val monetColors = mapOf(
                 "primary" to colorScheme.primary.toCssValue(),
                 "onPrimary" to colorScheme.onPrimary.toCssValue(),
@@ -89,6 +98,7 @@ object MonetColorsProvider {
         }
     }
 
+    // Material 主题：直接映射官方 ColorScheme 字段。
     @Composable
     private fun UpdateCssMaterial(colorScheme: ColorScheme) {
         LaunchedEffect(colorScheme) {
@@ -144,6 +154,7 @@ object MonetColorsProvider {
         }
     }
 
+    // 把键值对拼成 :root { --key: value; } 形式的 CSS。
     private fun Map<String, String>.toCssVars(): String {
         return buildString {
             append(":root {\n")
@@ -154,7 +165,9 @@ object MonetColorsProvider {
         }
     }
 
+    // Compose Color 转 CSS 十六进制；带透明度时输出 8 位 #RRGGBBAA。
     private fun Color.toCssValue(): String {
+        // 把 0..1 的浮点通道转成两位十六进制。
         fun Float.toHex(): String {
             return (this * 255).toInt().coerceIn(0, 255).toString(16).padStart(2, '0')
         }

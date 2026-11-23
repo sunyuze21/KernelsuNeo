@@ -9,10 +9,17 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.font.FontStyle
 
+/** shell 词法单元类型，用于决定高亮颜色。 */
 enum class ShellTokenKind { COMMENT, STRING, VARIABLE, KEYWORD }
 
+/** 源码区间 [start, end) 及其高亮类型，区间之间不重叠且按出现顺序排列。 */
 data class ShellToken(val kind: ShellTokenKind, val start: Int, val end: Int)
 
+/**
+ * 代码高亮配色。
+ *
+ * 颜色是固定值而非主题强调色，保证代码片段在任意主题下都可读。
+ */
 @Immutable
 data class ShellHighlightColors(
     val comment: Color,
@@ -20,13 +27,16 @@ data class ShellHighlightColors(
     val variable: Color,
     val keyword: Color,
 ) {
+    // 预置的浅色/深色两套配色及选择逻辑。
     companion object {
+        // 浅色背景配色（GitHub Light 风格）。
         private val light = ShellHighlightColors(
             comment = Color(0xFF6A737D),
             string = Color(0xFF032F62),
             variable = Color(0xFFE36209),
             keyword = Color(0xFFD73A49),
         )
+        // 深色背景配色（GitHub Dark 风格）。
         private val dark = ShellHighlightColors(
             comment = Color(0xFF8B949E),
             string = Color(0xFFA5D6FF),
@@ -35,20 +45,25 @@ data class ShellHighlightColors(
         )
 
         /** Fixed code colors that stay readable on [background], independent of the app accent. */
+        // 说明：按背景亮度二选一，不随应用强调色变化，避免代码可读性不可控。
         fun forBackground(background: Color): ShellHighlightColors =
             if (background.luminance() < 0.5f) dark else light
     }
 }
 
+// POSIX shell 保留字；只在“命令位置”出现时才高亮，避免误标普通参数。
 private val shellKeywords = setOf(
     "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done",
     "case", "esac", "select", "function", "in", "!", "{", "}",
 )
 
 /** Keywords after which the next word is a command again. */
+// 说明：这些关键字之后的下一个词重新处于命令位置，需要继续识别关键字/赋值。
 private val commandPrefixKeywords = setOf("if", "then", "else", "elif", "do", "while", "until", "!", "{")
 
+// 变量/命令名的首字符规则（简化版 POSIX）。
 private fun isNameStart(c: Char) = c == '_' || c in 'a'..'z' || c in 'A'..'Z'
+// 变量/命令名的后续字符规则。
 private fun isNameChar(c: Char) = isNameStart(c) || c in '0'..'9'
 
 /**
@@ -56,16 +71,21 @@ private fun isNameChar(c: Char) = isNameStart(c) || c in '0'..'9'
  * expansions (`$x`, `${x}`, `$(`, `$1`, `$?`, ...), reserved words in command position and the
  * name of `NAME=value` assignments. Tokens are non-overlapping and in source order; variables
  * inside double quotes are emitted between the string pieces around them.
+ *
+ * 说明：只做高亮所需的轻量词法分析，不验证语法；遇到未闭合的引号会一直
+ * 延伸到文本末尾，保证不会越界。
  */
 fun shellTokens(src: String): List<ShellToken> {
     val tokens = mutableListOf<ShellToken>()
     var i = 0
     val n = src.length
+    // 是否处于命令位置：决定普通单词能否被识别为关键字。
     var commandPosition = true
     // Previous reserved word on this command, to recognise `in` of for / case / select.
     var pendingIn = false
     var wordsSinceFor = 0
 
+    // 从 '$' 起解析参数展开的结束位置；无法识别时返回原位置（不高亮）。
     fun variableEnd(from: Int): Int {
         // src[from] == '$'
         val next = from + 1
@@ -199,6 +219,7 @@ fun shellTokens(src: String): List<ShellToken> {
     return tokens
 }
 
+/** 把 shell 源码转成带颜色的 [AnnotatedString]，供 Compose Text 渲染。 */
 fun highlightShell(src: String, colors: ShellHighlightColors): AnnotatedString {
     val builder = AnnotatedString.Builder(src)
     for (token in shellTokens(src)) {
@@ -213,6 +234,7 @@ fun highlightShell(src: String, colors: ShellHighlightColors): AnnotatedString {
     return builder.toAnnotatedString()
 }
 
+/** 记忆化高亮结果；只有源码或配色变化时才重新做词法分析。 */
 @Composable
 fun rememberShellHighlight(src: String, colors: ShellHighlightColors): AnnotatedString =
     remember(src, colors) { highlightShell(src, colors) }

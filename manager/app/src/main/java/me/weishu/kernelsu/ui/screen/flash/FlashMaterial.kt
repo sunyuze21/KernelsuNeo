@@ -48,12 +48,17 @@ import me.weishu.kernelsu.ui.component.material.SnackBarHost
 import me.weishu.kernelsu.ui.component.material.TopBarBackButton
 import me.weishu.kernelsu.ui.component.material.expressiveTopAppBarColors
 
+/**
+ * Material 3 主题下的刷写页：等宽字体实时日志、保存日志按钮，
+ * 成功后右下角按钮在重启/关闭之间切换。
+ */
 @Composable
 fun FlashScreenMaterial(
     state: FlashUiState,
     actions: FlashScreenActions,
     snackBarHost: SnackbarHostState,
 ) {
+    // 日志持续追加，滚动位置由下方 LaunchedEffect 自动跟随到底部
     val scrollState = rememberScrollState()
     if (state.showJailbreakWarning) {
         JailbreakFlashWarningDialog(
@@ -64,6 +69,7 @@ fun FlashScreenMaterial(
 
     ExpressiveScaffold(
         snackbarHost = {
+            // 成功时已有 FAB，避免 SafeDrawing 额外留白；失败/进行中需要避开系统栏
             SnackBarHost(
                 hostState = snackBarHost,
                 modifier = Modifier.let { if (state.flashingStatus == FlashingStatus.SUCCESS) it else it.safeDrawingPadding() })
@@ -93,10 +99,12 @@ fun FlashScreenMaterial(
             )
         },
         floatingActionButton = {
+            // 仅成功时展示操作按钮；是否需要重启由刷写结果决定
             if (state.flashingStatus == FlashingStatus.SUCCESS) {
                 val isRebootAction = state.showRebootAction
                 SmallExtendedFloatingActionButton(
                     onClick = { if (!state.actionInProgress) { if (isRebootAction) actions.onReboot() else actions.onClose() } },
+                    // 执行中收起文字只留进度圈，防止布局跳动
                     expanded = !state.actionInProgress,
                     icon = {
                         if (state.actionInProgress) {
@@ -124,6 +132,7 @@ fun FlashScreenMaterial(
         val layoutDirection = LocalLayoutDirection.current
         val navBars = WindowInsets.navigationBars.asPaddingValues()
         val captionBar = WindowInsets.captionBar.asPaddingValues()
+        // 刷写过程中屏蔽音量键，避免误触进入 recovery/fastboot
         KeyEventBlocker {
             it.key == Key.VolumeDown || it.key == Key.VolumeUp
         }
@@ -137,6 +146,7 @@ fun FlashScreenMaterial(
                 )
                 .verticalScroll(scrollState)
         ) {
+            // 每次日志更新后滚到底部，让用户看到最新输出
             LaunchedEffect(state.text) {
                 scrollState.animateScrollTo(scrollState.maxValue)
             }

@@ -15,10 +15,13 @@ use std::path::Path;
 use crate::defs;
 use crate::feature_id::{FeatureId, parse_feature_id};
 
+/// 特性持久化配置文件的绝对路径；位于 ksud 私有工作目录内。
 const FEATURE_CONFIG_PATH: &str = concatcp!(defs::WORKING_DIR, ".feature_config");
+/// 配置文件的魔数，用于在解析前拒绝明显不是本格式的文件。
 // 标识配置文件；按小端字节序依次是 "USK" 和 0x7f。
 #[allow(clippy::unreadable_literal)]
 const FEATURE_MAGIC: u32 = 0x7f4b5355;
+/// 配置文件格式版本；升版必须谨慎，旧版本读取时仅告警以保证降级可用。
 // 仅当磁盘布局变化时才递增；读取端在版本不匹配时仅告警，
 // 以便降级时仍有机会解析。
 const FEATURE_VERSION: u32 = 1;
@@ -27,7 +30,7 @@ const FEATURE_VERSION: u32 = 1;
 ///
 /// 值由内核持有，这个钩子只做响应。尤其是 sulog，需要其守护进程运行，
 /// 内核才有日志事件的消费者。
-fn on_feature_applied(feature_id: FeatureId, value: u64) {
+fn run_feature_hook(feature_id: FeatureId, value: u64) {
     if feature_id == FeatureId::Sulog
         && value != 0
         && let Err(err) = sulog::ensure_sulogd_running()
@@ -41,7 +44,7 @@ fn set_kernel_feature(feature_id: FeatureId, value: u64) -> Result<()> {
     crate::ksucalls::set_feature(feature_id as u32, value)
         .with_context(|| format!("Failed to set feature {} to {value}", feature_id.name()))?;
 
-    on_feature_applied(feature_id, value);
+    run_feature_hook(feature_id, value);
 
     Ok(())
 }
@@ -50,8 +53,8 @@ fn set_kernel_feature(feature_id: FeatureId, value: u64) -> Result<()> {
 ///
 /// 查询失败按“未强制”处理；后续写入会报告真正的错误，
 /// 而不是让这个探测阻断整个启动。
-fn is_forced(id: u32) -> bool {
-    crate::ksucalls::get_feature(id).is_ok_and(|state| state.forced)
+fn is_forced(feature_id: u32) -> bool {
+    crate::ksucalls::get_feature(feature_id).is_ok_and(|state| state.forced)
 }
 
 /// 以 `特性 id -> 值` 的形式加载持久化配置。
@@ -95,6 +98,7 @@ pub fn load_binary_config() -> Result<HashMap<u32, u64>> {
     let count = u32::from_le_bytes(count_buf);
 
     let mut features = HashMap::new();
+    // 逐条读取 (id, value) 对；id 在此不做白名单校验，未知 id 由调用方决定是否透传。
     for _ in 0..count {
         let mut id_buf = [0u8; 4];
         let mut value_buf = [0u8; 8];
@@ -156,30 +160,31 @@ pub fn save_binary_config(features: &HashMap<u32, u64>) -> Result<()> {
 pub fn apply_config(features: &HashMap<u32, u64>) {
     log::info!("Applying feature configuration to kernel...");
 
+    // 已成功写入内核的条目数，仅用于汇总日志，不作为失败判据。
     let mut applied = 0;
-    for (&id, &value) in features {
-        if is_forced(id) {
-            log::info!("Skip feature {id}: forced by boot config");
+    for (&feature_id, &value) in features {
+        if is_forced(feature_id) {
+            log::info!("Skip feature {feature_id}: forced by boot config");
             continue;
         }
-        match FeatureId::from_u32(id) {
-            Some(feature_id) => match set_kernel_feature(feature_id, value) {
+        match FeatureId::from_u32(feature_id) {
+            Some(known_feature) => match set_kernel_feature(known_feature, value) {
                 Ok(()) => {
-                    log::info!("Set feature {} to {value}", feature_id.name());
+                    log::info!("Set feature {} to {value}", known_feature.name());
                     applied += 1;
                 }
                 Err(e) => {
-                    log::warn!("Failed to set feature {}: {e}", feature_id.name());
+                    log::warn!("Failed to set feature {}: {e}", known_feature.name());
                 }
             },
-            None => match crate::ksucalls::set_feature(id, value) {
+            None => match crate::ksucalls::set_feature(feature_id, value) {
                 // 当前 ksud 不认识：直接透传原始 id，避免较新内核的特性在旧配置中丢失。
                 Ok(()) => {
-                    log::info!("Set feature {id} to {value}");
+                    log::info!("Set feature {feature_id} to {value}");
                     applied += 1;
                 }
                 Err(e) => {
-                    log::warn!("Failed to set feature {id}: {e}");
+                    log::warn!("Failed to set feature {feature_id}: {e}");
                 }
             },
         }
@@ -223,15 +228,15 @@ pub fn get_feature(id: &str) -> Result<()> {
 pub fn get_feature_config(id: &str) -> Result<()> {
     let feature_id = parse_feature_id(id)?;
 
-    let features = load_binary_config()?;
-    let id_u32 = feature_id as u32;
+    let feature_values = load_binary_config()?;
+    let numeric_id = feature_id as u32;
 
     println!("Feature: {}", feature_id.name());
-    println!("ID: {id_u32}");
+    println!("ID: {numeric_id}");
     println!("Description: {}", feature_id.description());
     println!("Source: config");
 
-    if let Some(value) = features.get(&id_u32) {
+    if let Some(value) = feature_values.get(&numeric_id) {
         println!("Value: {value}");
         println!(
             "Status: {}",
@@ -263,23 +268,24 @@ pub fn set_feature(id: &str, value: u64) -> Result<()> {
     }
 
     // 检查该特性是否由任意模块管理
-    if let Ok(managed_features_map) = crate::module::get_managed_features() {
+    if let Ok(managed_by_module) = crate::module::get_managed_features() {
         // 找出管理该特性的模块
-        let managing_modules: Vec<&String> = managed_features_map
+        // 收集所有声称拥有该特性的模块；存在多个属主时要求调用方匹配其中之一。
+        let owners: Vec<&String> = managed_by_module
             .iter()
-            .filter(|(_, features)| features.iter().any(|f| f == feature_id.name()))
+            .filter(|(_, features)| features.iter().any(|feature| feature == feature_id.name()))
             .map(|(module_id, _)| module_id)
             .collect();
 
-        if !managing_modules.is_empty() {
+        if !owners.is_empty() {
             // 特性已被管理，检查调用方是否为授权模块
             let caller_module = std::env::var("KSU_MODULE").unwrap_or_default();
 
-            if caller_module.is_empty() || !managing_modules.contains(&&caller_module) {
+            if caller_module.is_empty() || !owners.contains(&&caller_module) {
                 bail!(
                     "Feature '{}' is managed by module(s): {}. Direct modification is not allowed.",
                     feature_id.name(),
-                    managing_modules
+                    owners
                         .iter()
                         .map(|s| s.as_str())
                         .collect::<Vec<_>>()
@@ -314,13 +320,13 @@ pub fn list_features() {
     println!("{}", "=".repeat(80));
 
     // 从模块获取受管理的特性
-    let managed_features_map = crate::module::get_managed_features().unwrap_or_default();
+    let managed_by_module = crate::module::get_managed_features().unwrap_or_default();
 
     // 构建反向映射：feature_name -> Vec<module_id>
-    let mut feature_to_modules: HashMap<String, Vec<String>> = HashMap::new();
-    for (module_id, feature_list) in &managed_features_map {
+    let mut modules_by_feature: HashMap<String, Vec<String>> = HashMap::new();
+    for (module_id, feature_list) in &managed_by_module {
         for feature_name in feature_list {
-            feature_to_modules
+            modules_by_feature
                 .entry(feature_name.clone())
                 .or_default()
                 .push(module_id.clone());
@@ -328,10 +334,10 @@ pub fn list_features() {
     }
 
     for feature_id in &FeatureId::ALL {
-        let id = *feature_id as u32;
+        let numeric_id = *feature_id as u32;
         // 查询失败时回落到默认状态（不支持、值为 0），
         // 使内核缺少某特性时列表仍然可用。
-        let state = crate::ksucalls::get_feature(id).unwrap_or_default();
+        let state = crate::ksucalls::get_feature(numeric_id).unwrap_or_default();
 
         let status = if !state.supported {
             "NOT_SUPPORTED".to_string()
@@ -341,7 +347,7 @@ pub fn list_features() {
             "DISABLED".to_string()
         };
 
-        let managed_by = feature_to_modules.get(feature_id.name());
+        let managed_by = modules_by_feature.get(feature_id.name());
         let managed_mark = if state.forced {
             " [FORCED]"
         } else if managed_by.is_some() {
@@ -354,7 +360,7 @@ pub fn list_features() {
             "[{}] {} (ID={}){}",
             status,
             feature_id.name(),
-            id,
+            numeric_id,
             managed_mark
         );
         println!("    {}", feature_id.description());
@@ -395,12 +401,12 @@ pub fn save_config() -> Result<()> {
     let mut features = load_binary_config().unwrap_or_default();
 
     for feature_id in &FeatureId::ALL {
-        let id = *feature_id as u32;
-        if let Ok(state) = crate::ksucalls::get_feature(id)
+        let numeric_id = *feature_id as u32;
+        if let Ok(state) = crate::ksucalls::get_feature(numeric_id)
             && state.supported
             && !state.forced
         {
-            features.insert(id, state.value);
+            features.insert(numeric_id, state.value);
             log::info!("Saved feature {} = {}", feature_id.name(), state.value);
         }
     }
@@ -427,10 +433,10 @@ pub fn check_feature(id: &str) -> Result<()> {
     }
 
     // 检查该特性是否由任意模块管理
-    let managed_features_map = crate::module::get_managed_features().unwrap_or_default();
-    let is_managed = managed_features_map
+    let managed_by_module = crate::module::get_managed_features().unwrap_or_default();
+    let is_managed = managed_by_module
         .values()
-        .any(|features| features.iter().any(|f| f == feature_id.name()));
+        .any(|features| features.iter().any(|feature| feature == feature_id.name()));
 
     if is_managed {
         println!("managed");
@@ -463,7 +469,7 @@ pub fn init_forced_features() {
                 feature_id.name(),
                 state.value
             );
-            on_feature_applied(feature_id, state.value);
+            run_feature_hook(feature_id, state.value);
         }
     }
 }
@@ -476,18 +482,19 @@ pub fn init_forced_features() {
 pub fn init_features() -> Result<()> {
     log::info!("Initializing features from config...");
 
+    // 在内存副本上裁剪受模块管理的条目，避免直接改写磁盘文件语义。
     let mut features = load_binary_config()?;
 
     // 获取活跃模块管理的特性，并在初始化时跳过它们
-    if let Ok(managed_features_map) = crate::module::get_managed_features() {
-        if !managed_features_map.is_empty() {
+    if let Ok(managed_by_module) = crate::module::get_managed_features() {
+        if !managed_by_module.is_empty() {
             log::info!(
                 "Found {} modules managing features",
-                managed_features_map.len()
+                managed_by_module.len()
             );
 
             // 汇总所有需要跳过的受管理特性 ID
-            for (module_id, feature_list) in &managed_features_map {
+            for (module_id, feature_list) in &managed_by_module {
                 log::info!(
                     "Module '{module_id}' manages {} feature(s)",
                     feature_list.len()
@@ -495,9 +502,9 @@ pub fn init_features() -> Result<()> {
 
                 for feature_name in feature_list {
                     if let Ok(feature_id) = parse_feature_id(feature_name) {
-                        let feature_id_u32 = feature_id as u32;
+                        let numeric_id = feature_id as u32;
                         // 从配置中移除受管理的特性，交由模块自行控制
-                        if features.remove(&feature_id_u32).is_some() {
+                        if features.remove(&numeric_id).is_some() {
                             log::info!(
                                 "  - Skipping managed feature '{feature_name}' (controlled by module: {module_id})",
                             );

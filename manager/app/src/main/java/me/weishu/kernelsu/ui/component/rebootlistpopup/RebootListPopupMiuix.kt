@@ -19,11 +19,16 @@ import top.yukonga.miuix.kmp.icon.extended.Close2
 import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 
+/**
+ * Miuix 版重启弹窗。用 OverlayListPopup 贴合锚点展示，
+ * [alignment] 决定菜单相对图标的方位；[modifier] 透传给触发按钮以便外部定位。
+ */
 @Composable
 fun RebootListPopupMiuix(
     modifier: Modifier = Modifier,
     alignment: PopupPositionProvider.Align = PopupPositionProvider.Align.TopEnd
 ) {
+    // 弹窗显隐状态；同时作为按钮按压态，形成打开中的视觉反馈
     val showTopPopup = remember { mutableStateOf(false) }
     KsuIsValid {
         val onReboot = rememberRebootAction()
@@ -40,12 +45,14 @@ fun RebootListPopupMiuix(
         }
         OverlayListPopup(
             show = showTopPopup.value,
+            // 复用全局菜单定位策略，保证与其它下拉菜单一致的边界处理
             popupPositionProvider = ListPopupDefaults.MenuPositionProvider,
             alignment = alignment,
             onDismissRequest = {
                 showTopPopup.value = false
             },
             content = {
+                // 在弹窗内容中构建选项，避免每次重组都重新读取 PowerManager
                 val rebootOptions = getRebootListOption()
 
                 ListPopupColumn {
@@ -64,6 +71,9 @@ fun RebootListPopupMiuix(
     }
 }
 
+/**
+ * 单个重启菜单项。选择后先关闭弹窗再执行重启，避免动作与弹窗状态竞争。
+ */
 @Composable
 fun RebootDropdownItem(
     option: RebootListOption,

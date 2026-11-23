@@ -31,6 +31,11 @@ import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
+/**
+ * Miuix 版卸载对话框。与 Material 版流程一致：选择方式后二次确认，
+ * 确认才跳转刷写。这里用 remember(show) 让每次重新打开对话框都重置选择，
+ * 避免上次残留的 runType 造成误操作。
+ */
 @Composable
 fun UninstallDialogMiuix(
     show: Boolean,
@@ -38,14 +43,17 @@ fun UninstallDialogMiuix(
 ) {
     val context = LocalContext.current
     val navigator = LocalNavigator.current
+    // 仅开放“彻底卸载”和“恢复原厂镜像”；TEMPORARY 暂未实现
     val options = listOf(
         // TEMPORARY,
         PERMANENT,
         RESTORE_STOCK_IMAGE
     )
+    // 未实现分支的占位提示，避免用户点击后无反馈
     val showTodo = {
         Toast.makeText(context, "TODO", Toast.LENGTH_SHORT).show()
     }
+    // 以 show 为 key：对话框重新打开时重置确认态与所选方式
     val showConfirmDialog = remember(show) { mutableStateOf(false) }
     val runType = remember(show) { mutableStateOf<UninstallType?>(null) }
 
@@ -63,6 +71,7 @@ fun UninstallDialogMiuix(
     OverlayDialog(
         show = show,
         onDismissRequest = onDismissRequest,
+        // 由内容自行控制内边距，这里去掉默认留白
         insideMargin = DpSize(0.dp, 0.dp),
         content = {
             Text(
@@ -78,6 +87,7 @@ fun UninstallDialogMiuix(
             options.forEach { type ->
                 ArrowPreference(
                     onClick = {
+                        // 只记录选择并弹确认，真正执行在确认回调中
                         showConfirmDialog.value = true
                         runType.value = type
                     },
@@ -105,6 +115,7 @@ fun UninstallDialogMiuix(
     )
     val confirmDialog = rememberConfirmDialog(
         onConfirm = {
+            // 先关闭选择与确认两层，再执行跳转
             showConfirmDialog.value = false
             onDismissRequest()
             runType.value?.let { type ->

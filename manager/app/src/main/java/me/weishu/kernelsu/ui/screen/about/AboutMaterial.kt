@@ -38,11 +38,16 @@ import me.weishu.kernelsu.ui.component.material.SegmentedListItem
 import me.weishu.kernelsu.ui.component.material.TopBarBackButton
 import me.weishu.kernelsu.ui.component.material.expressiveTopAppBarColors
 
+/**
+ * 关于页的 Material 3 布局：展示图标、应用名、版本号和外部链接列表。
+ * 返回按钮交给外层导航处理，链接统一通过 actions.onOpenLink 打开。
+ */
 @Composable
 fun AboutScreenMaterial(
     state: AboutUiState,
     actions: AboutScreenActions,
 ) {
+    // 折叠式顶栏与列表滚动联动，滚动时标题自动收起。
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
 
     ExpressiveScaffold(
@@ -76,6 +81,7 @@ fun AboutScreenMaterial(
                         modifier = Modifier
                             .size(80.dp)
                             .clip(RoundedCornerShape(16.dp))
+                            // 图标前景可能带透明背景，用白色底保证在任何主题下都清晰。
                             .background(Color.White)
                     ) {
                         Image(

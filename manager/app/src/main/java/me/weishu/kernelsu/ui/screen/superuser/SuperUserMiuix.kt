@@ -103,6 +103,10 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
+/**
+ * Miuix 主题下的超级用户列表：搜索框嵌在顶栏下方，
+ * 支持排序/过滤弹层、下拉刷新与 UID 分组展开。
+ */
 @Composable
 fun SuperUserPagerMiuix(
     uiState: SuperUserUiState,
@@ -114,10 +118,12 @@ fun SuperUserPagerMiuix(
     val density = LocalDensity.current
 
     val scrollBehavior = MiuixScrollBehavior()
+    // 顶栏折叠时同步收缩搜索框上边距，保持视觉连贯
     val dynamicTopPadding by remember {
         derivedStateOf { 12.dp * (1f - scrollBehavior.state.collapsedFraction) }
     }
 
+    // 模糊开关开启且平台支持时才启用透明顶栏
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
@@ -150,6 +156,7 @@ fun SuperUserPagerMiuix(
                                     onDismissRequest = { showSortPopup.value = false },
                                     content = {
                                         ListPopupColumn {
+                                            // 排序项与“反向”共用 optionSize，分隔线不计入索引
                                             val sortEntries = listOf(
                                                 AppSortType.NAME to R.string.sort_by_name,
                                                 AppSortType.PACKAGE_NAME to R.string.sort_by_package_name,
@@ -213,6 +220,7 @@ fun SuperUserPagerMiuix(
                                         showTopPopup.value = false
                                     },
                                     content = {
+                                        // 只有多用户设备才提供“仅主用户应用”过滤
                                         val isMultiUser = uiState.userIds.size > 1
                                         val size = if (isMultiUser) 2 else 1
                                         ListPopupColumn {
@@ -286,6 +294,7 @@ fun SuperUserPagerMiuix(
             }
         },
         popupHost = {
+            // 搜索态下多应用分组默认展开，方便直接看到命中的包
             val expandedSearchUids = remember { mutableStateOf(setOf<Int>()) }
             LaunchedEffect(uiState.searchResults) {
                 expandedSearchUids.value = uiState.searchResults
@@ -400,6 +409,7 @@ fun SuperUserPagerMiuix(
         val layoutDirection = LocalLayoutDirection.current
         val lazyListState = rememberLazyListState()
         searchStatus.SearchBox {
+            // 自增计数用于“手动刷新也回到顶部”，与数据内容变化区分开
             val refreshTick = remember { mutableIntStateOf(0) }
             val latestGroupedApps = rememberUpdatedState(uiState.groupedApps)
             val latestRefreshing = rememberUpdatedState(uiState.isRefreshing)
@@ -419,6 +429,7 @@ fun SuperUserPagerMiuix(
                 stringResource(R.string.refresh_complete),
             )
 
+            // 主列表的展开状态与搜索列表相互独立，避免互相影响
             val expandedUids = remember { mutableStateOf(setOf<Int>()) }
             PullToRefresh(
                 isRefreshing = uiState.isRefreshing,
@@ -434,6 +445,7 @@ fun SuperUserPagerMiuix(
                     end = innerPadding.calculateEndPadding(layoutDirection)
                 ),
             ) {
+                // 列表内容作为模糊层采样源，滚动时顶栏模糊同步变化
                 Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
                     LazyColumn(
                         state = lazyListState,
@@ -487,6 +499,7 @@ fun SuperUserPagerMiuix(
     }
 }
 
+/** 分组内单应用行；左侧竖条颜色区分搜索命中项与普通项。 */
 @Composable
 private fun SimpleAppItem(
     app: AppInfo,
@@ -524,6 +537,10 @@ private fun SimpleAppItem(
     }
 }
 
+/**
+ * Miuix 风格 UID 分组卡片：点击进入授权详情，长按展开同 UID 的其他应用。
+ * UMOUNT 标签在深浅色主题下需要不同灰度才能保证对比度。
+ */
 @Composable
 private fun GroupItem(
     group: GroupedApps,
@@ -538,6 +555,7 @@ private fun GroupItem(
     val rootFg = colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
     val unmountFg = if (isInDarkTheme) Color.Black.copy(alpha = 0.4f) else Color.White.copy(alpha = 0.8f)
 
+    // UID 中的 userId 偏移用于标识工作资料/多用户应用
     val userId = group.uid / 100000
     val tags = remember(group.anyAllowSu, group.shouldUmount, group.anyCustom, userId) {
         buildList {

@@ -19,14 +19,14 @@ build as KSU_PACKAGE_NAME; the manager and kernel must agree on it. With
 --kernel this is handled automatically.
 
 Examples:
-  python3 build.py -p com.example.kernelsu -n "My KernelSU"
-  python3 build.py --kernel --kmi android15-6.6 -K release.jks -A key \\
+  python3 scripts/build.py -p com.example.kernelsu -n "My KernelSU"
+  python3 scripts/build.py --kernel --kmi android15-6.6 -K release.jks -A key \\
       -P storepass -S keypass
-  python3 build.py -a arm64-v8a -a x86_64 -b debug
-  python3 build.py -K my.jks -A mykey -P storepass -S keypass
-  python3 build.py --kernel --kmi android15-6.6
-  python3 build.py --kernel --skip-app --skip-ksud
-  python3 build.py --skip-ksud --skip-app
+  python3 scripts/build.py -a arm64-v8a -a x86_64 -b debug
+  python3 scripts/build.py -K my.jks -A mykey -P storepass -S keypass
+  python3 scripts/build.py --kernel --kmi android15-6.6
+  python3 scripts/build.py --kernel --skip-app --skip-ksud
+  python3 scripts/build.py --skip-ksud --skip-app
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 MANAGER_DIR = ROOT / "manager"
 KSUD_MANIFEST = ROOT / "userspace" / "ksud" / "Cargo.toml"
 JNILIBS_DIR = MANAGER_DIR / "app" / "src" / "main" / "jniLibs"
@@ -111,7 +111,7 @@ LKM_COPY_IGNORE = shutil.ignore_patterns(
 )
 
 DEFAULT_PACKAGE_NAME = "me.weishu.kernelsu"
-DEFAULT_APP_NAME = "KernelSU"
+DEFAULT_APP_NAME = "KernelsuNeo"
 
 # Android applicationId rules: at least two dot-separated segments, each
 # starting with a letter. Also keep it below KSU_MAX_PACKAGE_NAME (256).
@@ -1924,14 +1924,14 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  python3 build.py -p com.example.kernelsu -n \"My KernelSU\"\n"
-            "  python3 build.py --kernel --kmi android15-6.6 -K release.jks "
+            "  python3 scripts/build.py -p com.example.kernelsu -n \"My KernelSU\"\n"
+            "  python3 scripts/build.py --kernel --kmi android15-6.6 -K release.jks "
             "-A alias -P storepass -S keypass\n"
-            "  python3 build.py -a arm64-v8a -a x86_64 -b debug\n"
-            "  python3 build.py --kernel --kmi android15-6.6\n"
-            "  python3 build.py --kernel --skip-app --skip-ksud\n"
-            "  python3 build.py -K key.jks -A alias -P storepass -S keypass\n"
-            "  python3 build.py --dry-run\n"
+            "  python3 scripts/build.py -a arm64-v8a -a x86_64 -b debug\n"
+            "  python3 scripts/build.py --kernel --kmi android15-6.6\n"
+            "  python3 scripts/build.py --kernel --skip-app --skip-ksud\n"
+            "  python3 scripts/build.py -K key.jks -A alias -P storepass -S keypass\n"
+            "  python3 scripts/build.py --dry-run\n"
         ),
     )
 

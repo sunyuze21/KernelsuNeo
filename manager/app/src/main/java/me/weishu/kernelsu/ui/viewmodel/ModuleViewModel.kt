@@ -48,6 +48,12 @@ import me.weishu.kernelsu.ui.util.toggleModule as toggleModuleUtil
 import me.weishu.kernelsu.ui.util.undoUninstallModule as undoUninstallModuleUtil
 import me.weishu.kernelsu.ui.util.uninstallModule as uninstallModuleUtil
 
+/**
+ * 模块列表 ViewModel：加载模块、排序、搜索、更新检测与启停/卸载操作。
+ *
+ * 模块来自内核的挂载列表，操作会改变磁盘状态，因此任何写操作成功后都重新拉取列表，
+ * 而不是就地修改内存数据，避免界面与真实状态不一致。
+ */
 class ModuleViewModel(
     private val repo: ModuleRepository = ModuleRepositoryImpl(),
     private val settingsRepo: SettingsRepository = SettingsRepositoryImpl(),
@@ -55,9 +61,15 @@ class ModuleViewModel(
 ) : ViewModel() {
 
     companion object {
+        // 日志标签，用于过滤模块加载与更新检查相关日志
         private const val TAG = "ModuleViewModel"
     }
 
+    /**
+     * 更新信息的缓存签名：只有这些字段变化时才需要重新请求更新。
+     *
+     * 启用状态、update/remove 标记都会影响远端判断，因此一并纳入。
+     */
     private data class ModuleUpdateSignature(
         val updateJson: String,
         val versionCode: Int,
@@ -66,25 +78,31 @@ class ModuleViewModel(
         val remove: Boolean
     )
 
+    /** 签名 + 更新结果的缓存条目，用于跳过重复的网络检查。 */
     private data class ModuleUpdateCache(
         val signature: ModuleUpdateSignature,
         val info: ModuleUpdateInfo
     )
 
     private val _uiState = MutableStateFlow(ModuleUiState())
+    // 对外只读的模块列表状态，所有写操作都集中在本 ViewModel 内
     val uiState: StateFlow<ModuleUiState> = _uiState.asStateFlow()
 
     // One-shot UI events (toast/snackbar): buffered Channel, never dropped/duplicated/overwritten
     private val _moduleEvent = Channel<ModuleEffect>(Channel.BUFFERED)
     val moduleEvent: Flow<ModuleEffect> = _moduleEvent.receiveAsFlow()
 
+    // 保护更新缓存的并发访问：多个页面可能同时触发更新检查
     private val updateInfoMutex = Mutex()
     private var updateInfoCache: MutableMap<String, ModuleUpdateCache> = mutableMapOf()
+    // 正在请求中的模块 id，避免同一模块并发重复请求
     private val updateInfoInFlight = mutableSetOf<String>()
     private val searchQuery = MutableStateFlow("")
 
+    // 当前列表加载任务；新的加载会取消旧的，防止旧结果覆盖新数据
     private var fetchJob: Job? = null
 
+    // 外部（如安装完成）要求下次进入时强制刷新
     var isNeedRefresh = false
         private set
 
@@ -92,10 +110,16 @@ class ModuleViewModel(
         viewModelScope.launchSearchQueryCollector(searchQuery, ::applySearchText)
     }
 
+    /** 标记下次加载需要强制刷新。 */
     fun markNeedRefresh() {
         isNeedRefresh = true
     }
 
+    /**
+     * 从设置恢复排序偏好并重建列表。
+     *
+     * 必须在列表加载前调用，否则会先按默认顺序渲染再跳变。
+     */
     fun initializePreferences() {
         _uiState.update {
             it.copy(
@@ -107,6 +131,7 @@ class ModuleViewModel(
         updateModuleList()
     }
 
+    /** 切换"可执行模块优先"排序并持久化，随后按新顺序重建列表。 */
     fun toggleSortActionFirst() {
         val newValue = !_uiState.value.sortActionFirst
         settingsRepo.moduleSortActionFirst = newValue
@@ -114,6 +139,7 @@ class ModuleViewModel(
         updateModuleList()
     }
 
+    /** 切换"已启用优先"排序并持久化，随后按新顺序重建列表。 */
     fun toggleSortEnabledFirst() {
         val newValue = !_uiState.value.sortEnabledFirst
         settingsRepo.moduleSortEnabledFirst = newValue
@@ -121,6 +147,11 @@ class ModuleViewModel(
         updateModuleList()
     }
 
+    /**
+     * 刷新环境信息：是否安装了 Magisk、是否处于安全模式。
+     *
+     * 这些信息会影响模块操作的可用性，需在页面展示前获取。
+     */
     fun refreshEnvironmentState() {
         viewModelScope.launch {
             val magiskInstalled = withContext(Dispatchers.IO) { hasMagisk() }
@@ -134,6 +165,7 @@ class ModuleViewModel(
         }
     }
 
+    /** 更新搜索状态；仅关键字变化时推送去抖通道，避免重复搜索。 */
     fun updateSearchStatus(status: SearchStatus) {
         val previous = _uiState.value.searchStatus
         _uiState.update { it.copy(searchStatus = status) }
@@ -142,10 +174,16 @@ class ModuleViewModel(
         }
     }
 
+    /** 仅修改搜索关键字。 */
     fun updateSearchText(text: String) {
         updateSearchStatus(_uiState.value.searchStatus.copy(searchText = text))
     }
 
+    /**
+     * 按关键字过滤模块。
+     *
+     * 支持 id/名称/描述/作者与名称拼音；空关键字返回空列表，由调用方决定搜索态。
+     */
     private fun filterModules(modules: List<Module>, text: String): List<Module> {
         if (text.isEmpty()) return emptyList()
 
@@ -156,6 +194,11 @@ class ModuleViewModel(
         }
     }
 
+    /**
+     * 执行搜索过滤。
+     *
+     * 关键字被清空时回到完整列表（而不是空结果），保证退出搜索后列表可见。
+     */
     private suspend fun applySearchText(text: String) {
         _uiState.update {
             it.copy(
@@ -185,6 +228,11 @@ class ModuleViewModel(
         }
     }
 
+    /**
+     * 重建可见模块列表。
+     *
+     * resort 为 false 时保持现有顺序（启停/卸载后不跳位），仅刷新内容并追加新增项。
+     */
     private fun updateModuleList(resort: Boolean = true) {
         viewModelScope.launch(Dispatchers.IO) {
             val state = _uiState.value
@@ -211,6 +259,12 @@ class ModuleViewModel(
         }
     }
 
+    /**
+     * 模块排序比较器。
+     *
+     * 元模块且已启用者永远置顶；随后按"已启用优先/可执行优先"两个开关组合分档，
+     * 同档内按模块 id 使用系统语言排序，保证顺序稳定。
+     */
     private fun moduleComparator(state: ModuleUiState): Comparator<Module> {
         return compareBy<Module>(
             {
@@ -234,6 +288,12 @@ class ModuleViewModel(
         ).thenBy(Collator.getInstance(Locale.getDefault()), Module::id)
     }
 
+    /**
+     * 读取模块目录并更新状态。
+     *
+     * 读取失败时降级为空列表而非抛错，界面仍可展示错误之外的已有信息；
+     * 结果回主线程后再触发列表重建，避免并发写状态。
+     */
     suspend fun loadModuleList(resort: Boolean = true) {
         val parsedModules = withContext(Dispatchers.IO) {
             repo.getModules().getOrElse {
@@ -254,6 +314,12 @@ class ModuleViewModel(
         }
     }
 
+    /**
+     * 刷新模块列表，可选同时检查更新。
+     *
+     * 使用 fetchJob 保证同一时刻只有一个加载任务；无论成功失败都在 finally 中
+     * 结束刷新态并标记已加载，避免界面一直转圈。
+     */
     fun fetchModuleList(checkUpdate: Boolean = false, resort: Boolean = true) {
         fetchJob?.cancel()
         _uiState.update { it.copy(isRefreshing = true) }
@@ -272,6 +338,7 @@ class ModuleViewModel(
         }
     }
 
+    /** 生成用于判断"是否需要重新检查更新"的签名。 */
     private fun Module.toSignature(): ModuleUpdateSignature {
         return ModuleUpdateSignature(
             updateJson = updateJson,
@@ -282,6 +349,12 @@ class ModuleViewModel(
         )
     }
 
+    /**
+     * 同步所有模块的可用更新信息。
+     *
+     * 只请求签名变化且未在请求中的模块；单模块请求超时（5s）视为无更新，
+     * 防止某个坏链接拖慢整个列表的检查。
+     */
     suspend fun syncModuleUpdateInfo(modules: List<Module>) {
         if (!_uiState.value.checkModuleUpdate) return
 
@@ -290,6 +363,7 @@ class ModuleViewModel(
 
         updateInfoMutex.withLock {
             val ids = modules.map { it.id }.toSet()
+            // 清理已卸载模块的缓存，避免无限增长
             updateInfoCache.keys.filter { it !in ids }.forEach { removedId ->
                 removedIds += removedId
                 updateInfoCache.remove(removedId)
@@ -299,6 +373,7 @@ class ModuleViewModel(
             modules.forEach { module ->
                 val signature = module.toSignature()
                 val cached = updateInfoCache[module.id]
+                // add 成功表示抢占到该模块的请求权，避免并发重复请求
                 if ((cached == null || cached.signature != signature) && updateInfoInFlight.add(module.id)) {
                     modulesToFetch += Triple(module.id, module, signature)
                 }
@@ -328,6 +403,7 @@ class ModuleViewModel(
             }
         }
 
+        // 无变化时不必写状态，减少一次无意义的 Compose 重组
         if (removedIds.isEmpty() && changedEntries.isEmpty()) {
             return
         }
@@ -344,6 +420,12 @@ class ModuleViewModel(
         }
     }
 
+    /**
+     * 请求更新前的确认信息（含更新日志）。
+     *
+     * 若仓库校验判定更新源不可信，则拒绝并提示；只有校验通过才构建确认对话框，
+     * 保证用户下载的包来自预期来源。
+     */
     fun requestUpdateConfirmation(module: Module, updateInfo: ModuleUpdateInfo) {
         viewModelScope.launch {
             val verification = registryRepo.resolveUpdate(
@@ -362,6 +444,9 @@ class ModuleViewModel(
         }
     }
 
+    /**
+     * 构建卸载确认对话框；元模块需使用更严格的警告文案，提示卸载风险。
+     */
     fun requestUninstallConfirmation(module: Module) {
         val res = ksuApp.resources
         _uiState.update {
@@ -379,14 +464,26 @@ class ModuleViewModel(
         }
     }
 
+    /** 关闭当前确认对话框（用户取消）。 */
     fun dismissConfirmRequest() {
         _uiState.update { it.copy(confirmDialogState = null) }
     }
 
+    /**
+     * 发送一次性 UI 事件（Toast/Snackbar）。
+     *
+     * 使用 trySend 避免在无缓冲消费时阻塞界面线程；通道已满则丢弃最旧事件。
+     */
     fun emitEffect(effect: ModuleEffect) {
         _moduleEvent.trySend(effect)
     }
 
+    /**
+     * 启用/禁用模块。
+     *
+     * 成功后以"保持顺序"的方式刷新，避免刚点击的条目跳走；
+     * 并提示需要重启才能生效。
+     */
     fun toggleModule(module: Module) {
         viewModelScope.launch {
             val res = ksuApp.resources
@@ -403,6 +500,9 @@ class ModuleViewModel(
         }
     }
 
+    /**
+     * 卸载模块：无论成功失败都关闭对话框，并用 Snackbar 告知结果。
+     */
     fun uninstallModule(module: Module) {
         viewModelScope.launch {
             val res = ksuApp.resources
@@ -423,6 +523,9 @@ class ModuleViewModel(
         }
     }
 
+    /**
+     * 撤销卸载：依赖 ksud 的"延迟删除"机制恢复模块目录。
+     */
     fun undoUninstallModule(module: Module) {
         viewModelScope.launch {
             val res = ksuApp.resources
@@ -442,6 +545,12 @@ class ModuleViewModel(
         }
     }
 
+    /**
+     * 构建更新确认对话框状态，并按来源安全地获取更新日志。
+     *
+     * 仓库提供的日志优先且始终使用禁用 JavaScript 的受限渲染；
+     * 普通 URL 仅在非仓库地址时才直接请求，最后才回退到默认提示文案。
+     */
     private suspend fun buildUpdateConfirmDialogState(
         module: Module,
         updateInfo: ModuleUpdateInfo,
@@ -450,6 +559,7 @@ class ModuleViewModel(
         val res = ksuApp.resources
         val changelogUrl = updateInfo.changelog
 
+        // 更新日志的三种展示形态：纯文本 / HTML / 受限渲染
         var changelog = ""
         var html = false
         // Registry-hosted content is always shown in the restricted (JavaScript-off) renderer.
@@ -463,6 +573,7 @@ class ModuleViewModel(
                     html = true
                     restricted = true
                 }
+                // 仓库未内嵌日志时尝试按仓库 URL 拉取纯文本
                 if (changelog.isBlank() && registryRepo.isRegistryUrl(changelogUrl)) {
                     registryRepo.fetchRegistryText(changelogUrl)?.let {
                         changelog = it
@@ -472,6 +583,7 @@ class ModuleViewModel(
                 return@withContext
             }
             if (changelogUrl.isBlank()) return@withContext
+            // "#branch@path" 形式表示仓库内的日志文件
             if (changelogUrl.startsWith("#") && changelogUrl.contains('@')) {
                 val parts = changelogUrl.substring(1).split('@', limit = 2)
                 if (parts.size == 2) {
@@ -490,6 +602,7 @@ class ModuleViewModel(
                 }
                 return@withContext
             }
+            // 外部地址：失败时保持空字符串，由下方回退为默认文案
             changelog = runCatching {
                 ksuApp.okhttpClient.newCall(
                     Request.Builder().url(changelogUrl).build()
@@ -501,6 +614,7 @@ class ModuleViewModel(
         return ModuleConfirmDialogState(
             request = ModuleConfirmRequest.Update(
                 module = module,
+                // 优先使用仓库给出的下载地址，确保与校验信息配套
                 downloadUrl = registry?.zipUrl ?: updateInfo.downloadUrl,
                 fileName = "${module.name}-${updateInfo.version}.zip",
                 expected = registry?.expected,
@@ -514,6 +628,9 @@ class ModuleViewModel(
         )
     }
 
+    /**
+     * 查询单个模块的更新信息，失败时返回 Empty 表示"无更新"，避免中断整批检查。
+     */
     private suspend fun checkUpdate(m: Module): ModuleUpdateInfo {
         return repo.checkUpdate(m).getOrDefault(ModuleUpdateInfo.Empty)
     }

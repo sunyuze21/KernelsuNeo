@@ -34,6 +34,12 @@ import me.weishu.kernelsu.ui.component.profile.dialogs.MultiSelectDialog
 import me.weishu.kernelsu.ui.component.profile.dialogs.SingleSelectDialog
 import me.weishu.kernelsu.ui.util.isSepolicyValid
 
+/**
+ * Material 版 root profile 全量配置：UID/GID、附加组、能力、命名空间、
+ * root flag 与 SELinux 上下文/规则。所有这些字段都属于 root 授权策略，
+ * 任一字段被修改都会清除 [Natives.Profile.rootUseDefault]，
+ * 表示不再跟随内核默认 profile。
+ */
 @Composable
 fun RootProfileConfigMaterial(
     modifier: Modifier = Modifier,
@@ -49,12 +55,14 @@ fun RootProfileConfigMaterial(
             enabled = enabled,
             uid = profile.uid,
             gid = profile.gid,
+            // 手动改 UID/GID 即脱离默认 profile
             onUidChange = { onProfileChange(profile.copy(uid = it, rootUseDefault = false)) },
             onGidChange = { onProfileChange(profile.copy(gid = it, rootUseDefault = false)) }
         )
 
         GroupsPanel(
             enabled = enabled,
+            // 只保留仍存在于枚举中的 gid，避免旧配置带入未知值
             selected = profile.groups.mapNotNull { gid ->
                 Groups.entries.find { it.gid == gid }
             },
@@ -113,6 +121,9 @@ fun RootProfileConfigMaterial(
     }
 }
 
+/**
+ * UID/GID 输入面板。非数字输入回退为 0，避免 toInt 抛异常中断输入。
+ */
 @Composable
 private fun UidGidPanel(
     enabled: Boolean,
@@ -128,6 +139,7 @@ private fun UidGidPanel(
                 SegmentedTextField(
                     enabled = enabled,
                     value = uid.toString(),
+                    // 输入过程可能为空/非法，统一回退 0
                     onValueChange = { onUidChange(it.toIntOrNull() ?: 0) },
                     label = "UID",
                     singleLine = true
@@ -146,6 +158,11 @@ private fun UidGidPanel(
     )
 }
 
+/**
+ * 附加组多选面板。把内部排序集中在 remember 中，
+ * 让 ROOT/SYSTEM/SHELL 优先显示，其余按名称排序，便于查找。
+ * 内核限制最多 32 个附加组，因此 maxSelection 固定为 32。
+ */
 @Composable
 private fun GroupsPanel(
     enabled: Boolean,
@@ -176,6 +193,7 @@ private fun GroupsPanel(
             selectedItems = selected.toSet(),
             itemTitle = { it.display },
             itemSubtitle = { it.desc },
+            // 与内核每组上限保持一致
             maxSelection = 32,
             onSelectionChange = {
                 onSelectionChange(it)
@@ -184,6 +202,7 @@ private fun GroupsPanel(
         )
     }
 
+    // 摘要只展示已选项，空时显示 None
     val tag = if (selected.isEmpty()) {
         "None"
     } else {
@@ -196,6 +215,7 @@ private fun GroupsPanel(
             SegmentedListItem(
                 headlineContent = { Text(stringResource(R.string.profile_groups)) },
                 supportingContent = { Text(tag) },
+                // 禁用时不提供点击，避免打开只读对话框
                 onClick = if (enabled) {
                     { showDialog.value = true }
                 } else null
@@ -204,12 +224,16 @@ private fun GroupsPanel(
     )
 }
 
+/**
+ * 挂载命名空间选择面板。取值需与内核约定一致：0 继承 / 1 全局 / 2 独立。
+ */
 @Composable
 private fun MountNameSpacePanel(
     enabled: Boolean,
     namespace: Int,
     onNamespaceChange: (Int) -> Unit
 ) {
+    // 仅在本地使用的选项模型
     data class NamespaceOption(
         val value: Int,
         val label: String
@@ -217,6 +241,7 @@ private fun MountNameSpacePanel(
 
     val showDialog = remember { mutableStateOf(false) }
 
+    // 先取字符串资源再构造选项，保证语言切换后能重建
     val inheritedLabel = stringResource(R.string.profile_namespace_inherited)
     val globalLabel = stringResource(R.string.profile_namespace_global)
     val individualLabel = stringResource(R.string.profile_namespace_individual)
@@ -229,6 +254,7 @@ private fun MountNameSpacePanel(
         )
     }
 
+    // 未知取值回退到“继承”，避免摘要空白
     val selectedOption = options.find { it.value == namespace } ?: options[0]
 
     if (showDialog.value) {
@@ -259,6 +285,10 @@ private fun MountNameSpacePanel(
     )
 }
 
+/**
+ * root flag 多选面板。flag 通过 ordinal 与内核枚举对应，
+ * 因此这里按 ordinal 重新匹配，避免直接依赖对象相等性。
+ */
 @Composable
 private fun RootProfileFlagPanel(
     enabled: Boolean,
@@ -267,6 +297,7 @@ private fun RootProfileFlagPanel(
 ) {
     val showDialog = remember { mutableStateOf(false) }
 
+    // 用 ordinal 映射回当前枚举实例，旧版本数据也能安全展示
     val selectedFlags = remember(selected) {
         selected.mapNotNull { flag ->
             Natives.Profile.RootProfileFlag.entries.find { it.ordinal == flag.ordinal }
@@ -285,6 +316,7 @@ private fun RootProfileFlagPanel(
             selectedItems = selectedFlags.toSet(),
             itemTitle = { it.display },
             itemSubtitle = { null },
+            // flag 数量有限，无需限制上限
             maxSelection = Int.MAX_VALUE,
             onSelectionChange = {
                 onSelectionChange(it.toList())
@@ -313,6 +345,9 @@ private fun RootProfileFlagPanel(
     )
 }
 
+/**
+ * Linux capabilities 多选面板。profile 中保存的是 cap 数值，展示时才映射回枚举。
+ */
 @Composable
 private fun CapsPanel(
     enabled: Boolean,
@@ -321,6 +356,7 @@ private fun CapsPanel(
 ) {
     val showDialog = remember { mutableStateOf(false) }
 
+    // 过滤掉当前枚举不认识的 cap，防止旧数据导致异常
     val selectedCaps = remember(selected) {
         selected.mapNotNull { cap ->
             Capabilities.entries.find { it.cap == cap }
@@ -367,6 +403,10 @@ private fun CapsPanel(
     )
 }
 
+/**
+ * SELinux 配置入口面板，摘要展示域；规则编辑交给 [SELinuxDialog]。
+ * context 为空时用破折号占位，提示尚未设置。
+ */
 @Composable
 private fun SELinuxPanel(
     enabled: Boolean,
@@ -382,6 +422,7 @@ private fun SELinuxPanel(
             domain = context,
             rules = rules,
             onConfirm = { domain, r ->
+                // 两个字段都需写回，规则与域是一组配置
                 onContextChange(domain)
                 onRulesChange(r)
                 showDialog.value = false
@@ -404,6 +445,11 @@ private fun SELinuxPanel(
     )
 }
 
+/**
+ * SELinux 域与规则编辑对话框。域名需符合 `user:role:type[:level]` 形式，
+ * 规则用 [isSepolicyValid] 校验；任一不合法都禁用确认，避免写入内核后被拒绝。
+ * 编辑内容暂存在本地，确认时才通过 [onConfirm] 上抛。
+ */
 @Composable
 private fun SELinuxDialog(
     domain: String,
@@ -411,10 +457,12 @@ private fun SELinuxDialog(
     onConfirm: (String, String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    // 本地草稿，取消即丢弃
     var currentDomain by remember { mutableStateOf(domain) }
     var currentRules by remember { mutableStateOf(rules) }
 
     val isDomainValid = remember(currentDomain) {
+        // 仅允许小写字母/下划线组成的四段式 context
         val regex = Regex("^[a-z_]+:[a-z0-9_]+:[a-z0-9_]+(:[a-z0-9_]+)?$")
         currentDomain.matches(regex)
     }
@@ -429,6 +477,7 @@ private fun SELinuxDialog(
                     value = currentDomain,
                     onValueChange = { currentDomain = it },
                     label = { Text(stringResource(R.string.profile_selinux_domain)) },
+                    // 即时以错误色提示格式问题
                     isError = !isDomainValid,
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(
@@ -447,6 +496,7 @@ private fun SELinuxDialog(
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Ascii
                     ),
+                    // 规则通常多行，限制行数避免对话框过高
                     minLines = 3,
                     maxLines = 10
                 )

@@ -19,6 +19,7 @@ pub const KSU_CON: &str = "u:object_r:ksu_file:s0";
 /// 未打标签的 inode 会报告这个值，恢复流程把它视为“没有有效标签”。
 pub const UNLABEL_CON: &str = "u:object_r:unlabeled:s0";
 
+/// SELinux 标签存放的扩展属性名；读写都基于它而非外部 `restorecon` 工具。
 const SELINUX_XATTR: &str = "security.selinux";
 
 /// 设置 `path` 的 SELinux context，不跟随符号链接。

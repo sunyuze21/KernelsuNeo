@@ -16,6 +16,10 @@ import me.weishu.kernelsu.R
 import me.weishu.kernelsu.ui.component.material.SegmentedColumn
 import me.weishu.kernelsu.ui.component.material.SegmentedRadioItem
 
+/**
+ * 通用单选对话框。选中项先在本地缓冲，确认后才回调 [onConfirm]，
+ * 取消/关闭则丢弃选择，保证外部配置不会被中途修改。
+ */
 @Composable
 fun <T> SingleSelectDialog(
     title: String,
@@ -25,6 +29,7 @@ fun <T> SingleSelectDialog(
     onConfirm: (T) -> Unit,
     onDismiss: () -> Unit
 ) {
+    // 本地暂存选择，避免每次点击都写回持久化配置
     var selected by remember { mutableStateOf(selectedItem) }
 
     AlertDialog(
@@ -32,6 +37,7 @@ fun <T> SingleSelectDialog(
         title = { Text(title) },
         text = {
             SegmentedColumn(
+                // 选项较多时可滚动，防止对话框超出屏幕
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 content = items.map { item ->
                     {

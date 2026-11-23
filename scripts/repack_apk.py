@@ -12,7 +12,8 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 def workspace_root() -> Path:
-    return Path(__file__).resolve().parent
+    # scripts/ 的上一级才是仓库根目录。
+    return Path(__file__).resolve().parent.parent
 
 
 def load_jsonc(path: Path) -> dict:

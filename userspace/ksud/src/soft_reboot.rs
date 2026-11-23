@@ -33,6 +33,7 @@ use crate::{
     utils::{self, switch_mnt_ns},
 };
 
+/// 通过环境变量把管道写端 fd 号传给内置 `waitsys` 辅助进程。
 const WAITSYS_FD_ENV: &str = "KSU_WAITSYS_FD";
 
 /// 内置 `waitsys` 辅助进程的句柄。
@@ -41,7 +42,9 @@ const WAITSYS_FD_ENV: &str = "KSU_WAITSYS_FD";
 /// 一个字节。父进程持有读端；子进程只继承写端，写端 fd 号通过
 /// `KSU_WAITSYS_FD` 环境变量传递。
 struct Waitsys {
+    /// 辅助进程句柄；`Drop` 负责 kill + wait，避免留下僵尸。
     child: Child,
+    /// 管道读端，辅助程序每到达一个检查点就写入一个字节。
     read_fd: OwnedFd,
 }
 

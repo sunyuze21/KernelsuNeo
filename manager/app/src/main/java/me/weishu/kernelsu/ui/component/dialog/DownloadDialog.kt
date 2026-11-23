@@ -30,6 +30,10 @@ import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.window.WindowDialog
 
+/**
+ * 下载地址输入框入口，按当前 UI 模式分派到 Miuix/Material 实现。
+ * [onConfirm] 只会在 URL 通过 [isValidUrl] 校验后触发。
+ */
 @Composable
 fun DownloadDialog(
     show: Boolean,
@@ -42,6 +46,10 @@ fun DownloadDialog(
     }
 }
 
+/**
+ * Material 版下载对话框。URL 用 remember 保存，对话框关闭后（不进入组合）自然清空，
+ * 避免下次打开残留上次输入。
+ */
 @Composable
 private fun DownloadDialogMaterial(
     show: Boolean,
@@ -50,6 +58,7 @@ private fun DownloadDialogMaterial(
 ) {
     if (!show) return
 
+    // 输入内容由对话框自身管理，父级只需拿到最终确认的 URL
     var url by remember { mutableStateOf("") }
     ExpressiveDialog(
         onDismissRequest = onDismiss,
@@ -60,12 +69,14 @@ private fun DownloadDialogMaterial(
                 onValueChange = { url = it },
                 placeholder = { Text(stringResource(R.string.download_dialog_msg)) },
                 singleLine = true,
+                // 弹出 URL 键盘，减少用户输入负担
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 modifier = Modifier.fillMaxWidth()
             )
         },
         confirmButton = {
             TextButton(
+                // 未通过校验时禁用确认，避免把非法链接传入下载流程
                 enabled = isValidUrl(url.trim()),
                 onClick = { onConfirm(url.trim()) }
             ) {
@@ -80,12 +91,16 @@ private fun DownloadDialogMaterial(
     )
 }
 
+/**
+ * Miuix 版下载对话框，行为与 Material 版一致，仅控件风格不同。
+ */
 @Composable
 private fun DownloadDialogMiuix(
     show: Boolean,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // 每次进入组合新建状态，关闭后自动丢弃
     var url by remember { mutableStateOf("") }
     WindowDialog(
         show = show,
@@ -122,6 +137,10 @@ private fun DownloadDialogMiuix(
     )
 }
 
+/**
+ * 校验下载地址：必须是 https 且同时具备 host 与 path。
+ * 限制 https 是为了防止明文传输模块包，path 非空则排除仅有域名的无效链接。
+ */
 private fun isValidUrl(url: String): Boolean {
     if (url.isEmpty()) return false
     val uri = url.toUri()

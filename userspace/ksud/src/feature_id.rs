@@ -14,12 +14,18 @@ use anyhow::{Result, bail};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum FeatureId {
+    /// 传统 `su` 命令兼容模式，编号 0。
     SuCompat = 0,
+    /// 内核在必要时自动卸载模块，编号 1。
     KernelUmount = 1,
+    /// 内核日志转发，编号 2。
     Sulog = 2,
+    /// adbd root 支持，编号 3。
     AdbRoot = 3,
+    /// 对应用 UID 隐藏 SELinux 状态，编号 4。
     SelinuxHide = 4,
     // 5 曾是 webview_zygote_umount（v3.3.0），保留为未使用，以免旧配置被误用
+    /// shell 获取 root 时额外要求来自 adbd 或 ksu 域，编号 6。
     ShellSuAdbOnly = 6,
 }
 

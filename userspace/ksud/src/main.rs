@@ -77,6 +77,9 @@ mod utils;
 mod ksu_uapi;
 pub mod module_integrity_check;
 
+/// 程序入口：按目标平台选择 CLI 实现并返回其错误。
+///
+/// Android 上运行完整 CLI；宿主机只提供离线 boot 镜像修补等命令。
 fn main() -> anyhow::Result<()> {
     // Android 构建使用 `cli.rs` 中的完整命令行；主机构建只需要离线的
     // 启动镜像修补命令。

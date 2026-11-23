@@ -98,6 +98,13 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
+/**
+ * 颜色设置页的 Miuix 实现。
+ *
+ * Miuix 侧支持 Monet 开关、模糊栏与悬浮底栏等独有选项，因此使用
+ * [state] 里更完整的设置快照；所有变更仍通过 [actions] 写回 ViewModel，
+ * 保证与 Material 实现共享同一份持久化数据。
+ */
 @Composable
 fun ColorPaletteScreenMiuix(
     state: ColorPaletteUiState,
@@ -105,11 +112,13 @@ fun ColorPaletteScreenMiuix(
 ) {
     val scrollBehavior = MiuixScrollBehavior()
     val enableBlurState = LocalEnableBlur.current
+    // 模糊不可用时 backdrop 为 null，此时用不透明背景色兜底。
     val backdrop = rememberBlurBackdrop(enableBlurState)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
     val uiState = state.uiState
     val currentColorMode = state.currentColorMode
+    // 系统模式要结合当前系统深色状态判断，预览卡片的配色依赖此值。
     val isDark = currentColorMode.isDark || currentColorMode.isSystem && isSystemInDarkTheme()
 
     Scaffold(
@@ -140,6 +149,7 @@ fun ColorPaletteScreenMiuix(
         popupHost = { },
         contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal)
     ) { innerPadding ->
+        // 弹窗开关需要跨配置变更保留，否则旋屏后对话框会意外关闭。
         val showScaleDialog = rememberSaveable { mutableStateOf(false) }
 
         Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
@@ -173,6 +183,7 @@ fun ColorPaletteScreenMiuix(
                     )
                     TabRow(
                         tabs = themeItems,
+                        // themeMode >= 3 是 AMOLED 深色变体，展示上仍归入“深色”页签。
                         selectedTabIndex = (if (uiState.themeMode >= 3) uiState.themeMode - 3 else uiState.themeMode).coerceIn(0, 2),
                         onTabSelected = { index ->
                             actions.onSetThemeMode(index)
@@ -204,6 +215,7 @@ fun ColorPaletteScreenMiuix(
                             visible = uiState.miuixMonet
                         ) {
                             Column {
+                                // items 与 keyColorOptions 必须顺序一一对应，否则会选错颜色。
                                 val colorItems = listOf(
                                     stringResource(id = R.string.settings_key_color_default),
                                     stringResource(id = R.string.color_red),
@@ -222,6 +234,7 @@ fun ColorPaletteScreenMiuix(
                                     stringResource(id = R.string.color_blue_grey),
                                     stringResource(id = R.string.color_sakura),
                                 )
+                                // 首项 0 为“默认/跟随壁纸”，与 colorItems 的第一项对齐。
                                 val colorValues = listOf(0) + keyColorOptions
                                 OverlayDropdownPreference(
                                     title = stringResource(id = R.string.settings_key_color),
@@ -244,6 +257,7 @@ fun ColorPaletteScreenMiuix(
                                     visible = uiState.keyColor != 0
                                 ) {
                                     Column {
+                                        // 风格枚举顺序即下拉项顺序，持久化的是 name 字符串。
                                         val styles = PaletteStyle.entries
                                         OverlayDropdownPreference(
                                             title = stringResource(R.string.settings_color_style),
@@ -262,6 +276,7 @@ fun ColorPaletteScreenMiuix(
                                             }
                                         )
 
+                                        // 与风格相同，仅存储枚举名，读取时容错回退首项。
                                         val specs = ColorSpec.SpecVersion.entries
                                         OverlayDropdownPreference(
                                             title = stringResource(R.string.settings_color_spec),
@@ -416,6 +431,7 @@ fun ColorPaletteScreenMiuix(
                             onSelectedIndexChange = actions.onSetPagerInterceptionMode,
                         )
 
+                        // 本地滑动值先在 UI 内响应，松手后才持久化，减少 IO。
                         var sliderValue by remember(uiState.pageScale) { mutableFloatStateOf(uiState.pageScale) }
                         ArrowPreference(
                             title = stringResource(id = R.string.settings_page_scale),
@@ -468,6 +484,7 @@ fun ColorPaletteScreenMiuix(
                             .padding(top = 12.dp)
                             .fillMaxWidth(),
                     ) {
+                        // 行数同样采用本地状态，仅在滑动结束时回写设置。
                         var linesValue by remember(uiState.moduleDescriptionMaxLines) { mutableIntStateOf(uiState.moduleDescriptionMaxLines) }
                         BasicComponent(
                             title = stringResource(id = R.string.settings_module_description_max_lines),
@@ -519,6 +536,13 @@ fun ColorPaletteScreenMiuix(
     }
 }
 
+/**
+ * Miuix 主题预览卡片。
+ *
+ * 与 Material 版本不同，这里需要区分“Monet 开关是否开启”：
+ * 关闭时预览使用 Miuix 自身配色，开启时才根据主色动态生成方案；
+ * 同时还要模拟悬浮底栏/侧边栏形态，因此骨架构型比 Material 版更复杂。
+ */
 @SuppressLint("ConfigurationScreenWidthHeight")
 @Composable
 private fun ThemePreviewCardMiuix(
@@ -531,14 +555,17 @@ private fun ThemePreviewCardMiuix(
     colorSpec: ColorSpec.SpecVersion = ColorSpec.SpecVersion.SPEC_2021,
 ) {
     val configuration = LocalConfiguration.current
+    // 使用真实屏幕比例，让缩略图与设备实际布局一致。
     val screenWidth = configuration.screenWidthDp.toFloat()
     val screenHeight = configuration.screenHeightDp.toFloat()
     val screenRatio = screenWidth / screenHeight
     val useRail = useNavigationRail(enableFloatingBottomBar)
 
+    // keyColor 为 0 时沿用 Miuix 主题主色，避免把 0 当成纯黑色种子。
     val seedColor = if (keyColor == 0) colorScheme.primary else Color(keyColor)
     val effectiveStyle = if (keyColor == 0) PaletteStyle.TonalSpot else paletteStyle
     val effectiveSpec = if (keyColor == 0) ColorSpec.SpecVersion.Default else colorSpec
+    // 预览用动态色方案，只有开启 Monet 时才会参与绘制。
     val dynamicCs = rememberDynamicColorScheme(
         seedColor = seedColor,
         isDark = isDark,
@@ -546,6 +573,7 @@ private fun ThemePreviewCardMiuix(
         specVersion = effectiveSpec,
     )
 
+    // 颜色 token 在 Monet 开关下有两套来源，集中计算避免散落在各组件里。
     val bgColor = if (miuixMonet) dynamicCs.background else colorScheme.surface
     val textColor = if (miuixMonet) dynamicCs.onSurface else colorScheme.onBackground
     val accentCardColor = when {
@@ -600,6 +628,7 @@ private fun ThemePreviewCardMiuix(
 
                     BoxWithConstraints(modifier = Modifier.weight(1f)) {
                         val smallCardHeight = 12.dp
+                        // 按可用高度决定展示几条占位卡片，避免小屏预览溢出。
                         val smallCardCount = when {
                             maxHeight >= 96.dp -> 2
                             maxHeight >= 72.dp -> 1

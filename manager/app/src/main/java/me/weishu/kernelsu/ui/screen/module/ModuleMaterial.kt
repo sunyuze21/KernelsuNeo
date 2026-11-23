@@ -144,6 +144,12 @@ import me.weishu.kernelsu.ui.theme.LocalModuleDescriptionMaxLines
 import me.weishu.kernelsu.ui.util.reboot
 import top.yukonga.miuix.kmp.nav.gesture.WindowNavigationEventBridge
 
+/**
+ * Material 3 风格的模块页实现。
+ *
+ * 负责将 uiState 渲染为列表，并把用户操作转回 actions；两套皮肤共用逻辑，
+ * 因此这里不直接访问 ViewModel，也不缓存模块数据。
+ */
 @SuppressLint("StringFormatInvalid")
 @Composable
 fun ModulePagerMaterial(
@@ -163,10 +169,13 @@ fun ModulePagerMaterial(
 
     val pullToRefreshState = rememberPullToRefreshState()
 
+    // 主列表与搜索结果各自维护滚动位置，退出搜索后可回到原来的浏览位置
     val listState = rememberLazyListState()
     val searchListState = rememberLazyListState()
+    // 手动下拉刷新时递增，用于强制列表回到顶部（下拉刷新不一定改变排序状态）
     val refreshTick = remember { mutableIntStateOf(0) }
     val threshold = with(LocalDensity.current) { 100.dp.toPx() }
+    // 依据滚动增量折叠/展开安装 FAB；只在跨越阈值时翻转，避免频繁重组
     val fabExpanded by remember {
         var lastIndex = 0
         var lastOffset = 0
@@ -178,6 +187,7 @@ fun ModulePagerMaterial(
             val delta = if (currentIndex == lastIndex) {
                 (currentOffset - lastOffset).toFloat()
             } else if (currentIndex > lastIndex) {
+                // 跨 item 滚动时给出足够大的伪增量，确保方向判断可靠
                 100f
             } else {
                 -100f
@@ -201,6 +211,7 @@ fun ModulePagerMaterial(
 
     val shortcutState = rememberModuleShortcutState(context)
     val showShortcutDialog = remember { mutableStateOf(false) }
+    // 确认对话框由 uiState 驱动；确认回调必须区分卸载与更新两种请求
     val confirmDialog = rememberConfirmDialog(
         onConfirm = {
             when (val request = confirmDialogState?.request) {
@@ -212,6 +223,7 @@ fun ModulePagerMaterial(
         onDismiss = actions.onDismissConfirmRequest,
     )
 
+    // 打开快捷方式编辑面板前先切换类型，确保默认图标与“已存在”判断对应正确类型
     fun openShortcutDialogForType(type: ShortcutType) {
         shortcutState.selectType(type)
         showShortcutDialog.value = true
@@ -223,6 +235,7 @@ fun ModulePagerMaterial(
         shortcutState.updateIconUri(uri?.toString())
     }
 
+    // 长按入口：把模块信息写入共享状态后再打开面板，避免面板显示上一个模块的数据
     fun onModuleAddShortcut(module: Module, type: ShortcutType) {
         shortcutState.bindModule(module)
         openShortcutDialogForType(type)
@@ -243,6 +256,7 @@ fun ModulePagerMaterial(
     }
 
     val scope = rememberCoroutineScope()
+    // 记录当前重启提示的协程，便于新提示直接替换旧提示而不排队
     val snackbarJob = remember { mutableStateOf<Job?>(null) }
     ObserveAsEvents(moduleEvent) { event ->
         when (event) {
@@ -340,6 +354,7 @@ fun ModulePagerMaterial(
                 },
                 scrollBehavior = scrollBehavior,
                 searchContent = { bottomPadding, closeSearch ->
+                    // 搜索结果变化时滚动置顶，防止沿用主列表的滚动位置而看不到命中项
                     val latestSearchResults = rememberUpdatedState(uiState.searchResults)
                     ScrollToTopOnChange(
                         searchListState,
@@ -361,6 +376,7 @@ fun ModulePagerMaterial(
         floatingActionButton = {
             if (uiState.installButtonVisible) {
                 val moduleInstall = stringResource(id = R.string.module_install)
+                // 安装入口支持多选：逐个提取 clipData 中的 zip，交给刷写页处理
                 val selectZipLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.StartActivityForResult()
                 ) { activityResult ->
@@ -408,6 +424,7 @@ fun ModulePagerMaterial(
             })
         }
     ) { innerPadding ->
+        // 下拉刷新只触发数据刷新；完成状态由 uiState.isRefreshing 决定
         PullToRefreshBox(
             modifier = Modifier
                 .fillMaxSize()
@@ -427,6 +444,7 @@ fun ModulePagerMaterial(
                 )
             },
         ) {
+            // 检测到 Magisk 时直接提示冲突，不展示模块列表以避免误装
             if (uiState.magiskInstalled) {
                 Box(
                     modifier = Modifier
@@ -443,6 +461,7 @@ fun ModulePagerMaterial(
             }
             val latestModuleList = rememberUpdatedState(uiState.moduleList)
             val latestRefreshing = rememberUpdatedState(uiState.isRefreshing)
+            // 排序变化或手动刷新时回到顶部；刷新期间挂起，避免与数据更新争抢滚动
             ScrollToTopOnChange(
                 listState,
                 uiState.sortEnabledFirst,
@@ -478,6 +497,7 @@ fun ModulePagerMaterial(
     )
 }
 
+/** 模块列表：主列表与搜索结果复用，key 使用模块 id 以保证增删时 item 状态稳定。 */
 @Composable
 private fun ModuleList(
     bottomInnerPadding: Dp,
@@ -497,17 +517,20 @@ private fun ModuleList(
         contentPadding = PaddingValues(
             start = 16.dp,
             end = 16.dp,
+            // 预留 FAB 与底部内边距，避免最后一项被遮挡
             bottom = 16.dp + bottomInnerPadding + 56.dp + 16.dp
         ),
     ) {
         items(displayModules, key = { it.id }, contentType = { "module" }) { module ->
             val scope = rememberCoroutineScope()
+            // 没有更新信息时使用 Empty，避免下游处处判空
             val moduleUpdateInfo = updateInfoMap[module.id] ?: ModuleUpdateInfo.Empty
 
             ModuleItem(
                 module = module,
                 updateUrl = moduleUpdateInfo.downloadUrl,
                 onUninstallClicked = {
+                    // remove 为 true 表示处于待卸载状态，此时按钮语义是“撤销”
                     if (module.remove) {
                         actions.onUndoUninstallModule(module)
                     } else {
@@ -518,6 +541,7 @@ private fun ModuleList(
                     actions.onToggleModule(module)
                 },
                 onUpdate = {
+                    // 更新前先走确认弹窗；加载框只覆盖确认请求的短暂等待
                     scope.launch {
                         loadingDialog.withLoading {
                             actions.onRequestUpdateConfirmation(module, moduleUpdateInfo)
@@ -537,6 +561,7 @@ private fun ModuleList(
     }
 }
 
+/** 快捷方式编辑底部面板；只在 show 为 true 时组合，关闭即释放内部状态。 */
 @Composable
 private fun ModuleShortcutSheet(
     show: Boolean,
@@ -550,6 +575,7 @@ private fun ModuleShortcutSheet(
     val context = LocalContext.current
     val resources = LocalResources.current
 
+    // 复制深链便于在桌面/脚本中复用，无需真的创建快捷方式
     fun copyShortcutUrl() {
         val url = shortcutState.buildShortcutUrl() ?: return
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -693,6 +719,7 @@ private fun ModuleShortcutSheet(
     }
 }
 
+/** 单个模块卡片：展示状态、描述与操作按钮，并处理展开/折叠与 WebUI 点击冲突。 */
 @Composable
 private fun ModuleItem(
     module: Module,
@@ -707,8 +734,10 @@ private fun ModuleItem(
 ) {
     val hasDescription = module.description.isNotBlank()
     val maxLinesLimit = LocalModuleDescriptionMaxLines.current
+    // 以模块 id 为 key 保存展开状态，列表增删或换位后不会串到其他模块
     var expanded by rememberSaveable(module.id) { mutableStateOf(false) }
     var descriptionCanExpand by rememberSaveable(module.id) { mutableStateOf(true) }
+    // WebUI 只在模块启用且未标记卸载时可用，避免打开已失效入口
     val canOpenWebUi = module.hasWebUi && !module.remove && module.enabled
     val cardInteractionSource = remember { MutableInteractionSource() }
     val descriptionInteractionSource = remember { MutableInteractionSource() }
@@ -717,6 +746,7 @@ private fun ModuleItem(
         modifier = Modifier.fillMaxWidth(),
         interactionSource = cardInteractionSource,
         onClick = {
+            // 有 WebUI 时点击卡片优先打开 WebUI；否则退化为展开/收起描述
             if (canOpenWebUi) {
                 onOpenWebUi()
                 closeSearch()
@@ -726,6 +756,7 @@ private fun ModuleItem(
         }
     ) {
         val haptic = LocalHapticFeedback.current
+        // 待卸载模块统一加删除线，明确当前只是标记而非已删除
         val textDecoration = if (!module.remove) null else TextDecoration.LineThrough
 
         Column(
@@ -815,6 +846,7 @@ private fun ModuleItem(
             }
 
             Row(modifier = Modifier.padding(vertical = 4.dp)) {
+                // 元模块只能存在一个，用醒目标签区分；preinitWarning 表示下次开机预初始化不会执行
                 if (module.metamodule) {
                     StatusTag(
                         "META",
@@ -841,7 +873,9 @@ private fun ModuleItem(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // 更新入口仅在仓库/更新源给出下载地址时出现
                 val hasUpdate = updateUrl.isNotEmpty()
+                // 待卸载或已禁用的模块不允许再触发动作、WebUI 与更新
                 val actionButtonsEnabled = !module.remove && module.enabled
 
                 AnimatedVisibility(
@@ -982,6 +1016,12 @@ private fun ModuleItem(
     }
 }
 
+/**
+ * 同时支持点击与长按的按钮。
+ *
+ * Material3 的 Button 不暴露长按事件，这里用 Surface + combinedClickable 复刻外观，
+ * 以便“点击执行、长按创建快捷方式”共存。
+ */
 @Composable
 fun CombinedClickableButton(
     onClick: () -> Unit,
@@ -995,6 +1035,7 @@ fun CombinedClickableButton(
     interactionSource: MutableInteractionSource? = null,
     content: @Composable RowScope.() -> Unit,
 ) {
+    // 允许外部传入 interactionSource 以复用按压状态；未传时自行创建并记住
     val interactionSource = interactionSource ?: remember { MutableInteractionSource() }
 
     Surface(

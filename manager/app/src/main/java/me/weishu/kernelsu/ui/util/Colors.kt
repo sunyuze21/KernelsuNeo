@@ -3,7 +3,13 @@ package me.weishu.kernelsu.ui.util
 import java.util.Locale
 import kotlin.math.pow
 
+/**
+ * 把 ARGB 整数转成 CSS 的 `rgba()` 字符串。
+ *
+ * 使用 [Locale.ROOT] 格式化，避免某些地区用逗号作小数点导致 WebView 解析失败。
+ */
 fun cssColorFromArgb(argb: Int): String {
+    // CSS alpha 取值范围 0..1，保留三位小数。
     val a = ((argb ushr 24) and 0xFF) / 255f
     val r = (argb ushr 16) and 0xFF
     val g = (argb ushr 8) and 0xFF
@@ -11,6 +17,11 @@ fun cssColorFromArgb(argb: Int): String {
     return "rgba(${r},${g},${b},${"%.3f".format(Locale.ROOT, a)})"
 }
 
+/**
+ * 按 [ratio] 在两色之间线性插值，ratio=0 取 [c1]，ratio=1 取 [c2]。
+ *
+ * 逐通道计算并裁剪到 0..255，避免插值越界产生非法颜色。
+ */
 fun mixArgb(c1: Int, c2: Int, ratio: Float): Int {
     val r1 = (c1 ushr 16) and 0xFF
     val g1 = (c1 ushr 8) and 0xFF
@@ -30,7 +41,13 @@ fun mixArgb(c1: Int, c2: Int, ratio: Float): Int {
     return (a shl 24) or (r shl 16) or (g shl 8) or b
 }
 
+/**
+ * 计算颜色的相对亮度（WCAG 2.x 定义），用于对比度判断。
+ *
+ * 需要先做 sRGB 线性化，否则深色与亮色的对比度会被高估。
+ */
 fun relativeLuminance(argb: Int): Double {
+    // sRGB 分段线性化：低亮度段近似线性，其余走 2.4 次幂。
     fun linearize(c: Int): Double {
         val s = c / 255.0
         return if (s <= 0.03928) s / 12.92 else ((s + 0.055) / 1.055).pow(2.4)
@@ -42,6 +59,11 @@ fun relativeLuminance(argb: Int): Double {
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
+/**
+ * 计算两色的对比度，范围为 1..21。
+ *
+ * 公式要求较亮色作分子，+0.05 是为了避免纯黑时除零。
+ */
 fun contrastRatio(a: Int, b: Int): Double {
     val l1 = relativeLuminance(a)
     val l2 = relativeLuminance(b)
@@ -49,6 +71,11 @@ fun contrastRatio(a: Int, b: Int): Double {
     return (hi + 0.05) / (lo + 0.05)
 }
 
+/**
+ * ARGB 转 HSL，返回 (hue 0..360, saturation 0..1, lightness 0..1)。
+ *
+ * 用于在保持色相/饱和度的前提下调整明度。
+ */
 fun argbToHsl(argb: Int): Triple<Float, Float, Float> {
     val r = ((argb ushr 16) and 0xFF) / 255f
     val g = ((argb ushr 8) and 0xFF) / 255f
@@ -56,6 +83,7 @@ fun argbToHsl(argb: Int): Triple<Float, Float, Float> {
     val max = maxOf(r, g, b)
     val min = minOf(r, g, b)
     val l = (max + min) / 2f
+    // d 为色度差，用于判断是否为灰色并计算饱和度。
     val d = max - min
     val s = if (d == 0f) 0f else d / (1f - kotlin.math.abs(2f * l - 1f))
     val h = when {
@@ -67,7 +95,13 @@ fun argbToHsl(argb: Int): Triple<Float, Float, Float> {
     return Triple(h, s, l)
 }
 
+/**
+ * HSL 转 ARGB；[alpha] 默认为不透明。
+ *
+ * 色相按 60° 分段映射到 RGB 六边形，再统一叠加明度偏移 [m]。
+ */
 fun hslToArgb(h: Float, s: Float, l: Float, alpha: Int = 0xFF): Int {
+    // c 为色度，x 为次分量，m 为各通道需要平移的明度基准。
     val c = (1f - kotlin.math.abs(2f * l - 1f)) * s
     val x = c * (1f - kotlin.math.abs((h / 60f) % 2f - 1f))
     val m = l - c / 2f
@@ -85,19 +119,34 @@ fun hslToArgb(h: Float, s: Float, l: Float, alpha: Int = 0xFF): Int {
     return (alpha shl 24) or (r shl 16) or (g shl 8) or b
 }
 
+/**
+ * 在保持色相/饱和度的前提下调整明度，[delta] 为正变亮、为负变暗。
+ *
+ * 明度会被裁剪到合法范围，原 alpha 保持不变。
+ */
 fun adjustLightnessArgb(argb: Int, delta: Float): Int {
     val (h, s, l) = argbToHsl(argb)
+    // 目标明度限制在 0..1，防止越界。
     val nl = (l + delta).coerceIn(0f, 1f)
     val alpha = (argb ushr 24) and 0xFF
     return hslToArgb(h, s, nl, alpha)
 }
 
+/**
+ * 若 [candidate] 与 [original] 的对比度不足 [minRatio]，则逐步混入白色或黑色，
+ * 返回满足对比度的最接近颜色。
+ *
+ * 采用二分查找（12 次迭代，精度足够）减少反复计算；这用于主题色在深/浅背景下
+ * 的可读性兜底。
+ */
 fun ensureVisibleByMix(original: Int, candidate: Int, minRatio: Double, mixWithWhiteIfLighter: Boolean): Int {
     if (contrastRatio(original, candidate) >= minRatio) return candidate
+    // 背景偏亮时混白，偏暗时混黑，以尽量保持原色观感。
     val target = if (mixWithWhiteIfLighter) 0xFFFFFFFF.toInt() else 0xFF000000.toInt()
     var lo = 0f
     var hi = 1f
     var best = candidate
+    // 二分搜索最小混色比例。
     for (i in 0 until 12) {
         val mid = (lo + hi) / 2f
         val mixed = mixArgb(candidate, target, mid)

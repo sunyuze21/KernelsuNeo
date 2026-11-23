@@ -53,6 +53,7 @@ import okhttp3.Request
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
+/** 仓库列表页入口：合并仓库数据与本地已装版本，再按主题分发到两套 UI。 */
 @Composable
 fun ModuleRepoScreen() {
     val navigator = LocalNavigator.current
@@ -61,6 +62,7 @@ fun ModuleRepoScreen() {
     val installedVm = viewModel<ModuleViewModel>()
     val installedUiState by installedVm.uiState.collectAsStateWithLifecycle()
 
+    // 只在首次进入时拉取，避免每次重组重复请求；ViewModel 负责后续缓存与刷新
     LaunchedEffect(Unit) {
         if (uiState.modules.isEmpty()) {
             viewModel.refresh()
@@ -70,6 +72,7 @@ fun ModuleRepoScreen() {
         }
     }
 
+    // 只依赖已装模块，版本号变化时才重新构建映射，减少无谓重组
     val installedVersions = remember(installedUiState.modules) {
         installedUiState.modules.associate { it.id to it.versionCode }
     }
@@ -83,6 +86,7 @@ fun ModuleRepoScreen() {
         onSearchStatusChange = viewModel::updateSearchStatus,
         onSetSortOrder = viewModel::setSortOrder,
         onOpenRepoDetail = { module ->
+            // 详情页需要 Parcelable 参数，这里把列表项拍平成 RepoModuleArg
             val args = RepoModuleArg(
                 moduleId = module.moduleId,
                 moduleName = module.moduleName,
@@ -104,15 +108,18 @@ fun ModuleRepoScreen() {
     }
 }
 
+/** 仓库详情页：加载详情、对比已装版本，并处理下载后的安装/运行分流。 */
 @Composable
 fun ModuleRepoDetailScreen(module: RepoModuleArg) {
     val navigator = LocalNavigator.current
     val uriHandler = LocalUriHandler.current
+    // 以模块 id 作为 ViewModel key，保证不同模块详情互不复用状态
     val detailVm = viewModel<ModuleRepoDetailViewModel>(key = "module-repo-detail-${module.moduleId}")
     val detailState by detailVm.state.collectAsStateWithLifecycle()
     val installedVm = viewModel<ModuleViewModel>()
     val installedUiState by installedVm.uiState.collectAsStateWithLifecycle()
 
+    // 切换到其他模块时重新加载详情；已装列表为空则补拉一次用于版本对比
     LaunchedEffect(module.moduleId) {
         if (installedUiState.modules.isEmpty()) {
             installedVm.fetchModuleList()
@@ -147,6 +154,7 @@ fun ModuleRepoDetailScreen(module: RepoModuleArg) {
         onOpenWebUrl = { state.webUrl.takeIf { it.isNotEmpty() }?.let(openUrl) },
         onOpenUrl = openUrl,
         onInstallModule = { uri ->
+            // 脚本走运行页；普通模块进入刷写流程，由刷写页负责最终安装与热安装判断
             if (state.isScript) {
                 val name = state.detail?.module?.moduleName ?: module.moduleName
                 navigator.push(Route.ScriptRun(ScriptRunArg(uri, registryId = module.moduleId, displayName = name)))
@@ -171,6 +179,7 @@ class ReleaseDownloadHandle(private val sha256: String, downloadedUri: Uri?) {
     var downloadedUri by mutableStateOf(downloadedUri)
         private set
 
+    /** 记录下载结果；校验通过的 uri 会写入进程级缓存，供返回详情页后直接安装。 */
     fun setDownloaded(uri: Uri?) {
         downloadedUri = uri
         if (uri != null) verifiedDownloads[sha256] = uri else verifiedDownloads.remove(sha256)
@@ -183,6 +192,7 @@ class ReleaseDownloadHandle(private val sha256: String, downloadedUri: Uri?) {
  */
 private val verifiedDownloads = ConcurrentHashMap<String, Uri>()
 
+/** 按 zipUrl 与 sha256 记住下载句柄；同一发布版本复用时保留已下载结果。 */
 @Composable
 fun rememberReleaseDownload(release: RepoRelease): ReleaseDownloadHandle =
     remember(release.zipUrl, release.sha256) {
@@ -206,6 +216,7 @@ fun CoroutineScope.startReleaseDownload(context: Context, release: RepoRelease, 
                 handle.setDownloaded(uri)
             },
             onDownloading = { handle.isDownloading = true },
+            // 进度回调切回主线程更新状态，避免跨线程写 Compose 状态
             onProgress = { p -> launch(Dispatchers.Main) { handle.progress = p } },
             expected = ExpectedFile(size = release.zipSize, sha256 = release.sha256),
             onFailed = { failed ->
@@ -216,6 +227,7 @@ fun CoroutineScope.startReleaseDownload(context: Context, release: RepoRelease, 
     }
 }
 
+/** 把下载失败原因翻译成用户可读文案；校验失败需明确指出文件名。 */
 fun downloadFailureMessage(context: Context, state: DownloadManager.DownloadState, fileName: String): String =
     when (state.verificationFailure) {
         DownloadVerificationException.Reason.URL_NOT_ALLOWED -> context.getString(R.string.module_repo_download_url_blocked)
@@ -225,6 +237,7 @@ fun downloadFailureMessage(context: Context, state: DownloadManager.DownloadStat
         null -> context.getString(R.string.download_failed_content, fileName)
     }
 
+/** 以 1024 进制格式化文件大小；固定 Locale.ROOT，避免小数点随语言变化。 */
 fun formatFileSize(size: Long): String = when {
     size >= 1024L * 1024L * 1024L -> String.format(Locale.ROOT, "%.1f GB", size / (1024f * 1024f * 1024f))
     size >= 1024L * 1024L -> String.format(Locale.ROOT, "%.1f MB", size / (1024f * 1024f))
@@ -236,21 +249,27 @@ fun formatFileSize(size: Long): String = when {
 fun shortHash(hash: String, head: Int = 12, tail: Int = 8): String =
     if (hash.length <= head + tail + 1) hash else hash.take(head) + "…" + hash.takeLast(tail)
 
+// 图标下载上限与解码尺寸限制，防止异常资源占用过多内存
 private const val MAX_ICON_BYTES = 512L * 1024
+/** 图标解码后的目标边长（像素），用于限制列表图标的内存占用。 */
 private const val ICON_DECODE_PX = 192
+// 进程级图标缓存，key 为内容寻址的 registry 资源地址
 private val iconCache = LruCache<String, ImageBitmap>(128)
 
+/** 只允许访问 registry 源、且不跟随重定向的 OkHttp 客户端，避免图标下载被劫持。 */
 private val iconClient by lazy {
     // Icons are content-hashed registry assets: no redirects, registry origin only.
     ksuApp.okhttpClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
 }
 
+/** 校验并下载 registry 图标；失败时返回 null，由调用方选择不渲染图标。 */
 private fun loadRegistryIcon(url: String): ImageBitmap? {
     if (!RegistryUrls.isAllowedRestrictedResource(url, RegistryUrls.DEFAULT_BASE_URL)) return null
     return runCatching {
         iconClient.newCall(Request.Builder().url(url).build()).execute().use { resp ->
             if (!resp.isSuccessful) return null
             val source = resp.body.source()
+            // 先探测是否超限，避免把超大响应体读入内存
             if (source.request(MAX_ICON_BYTES + 1)) return null
             val bytes = source.readByteArray()
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -269,6 +288,7 @@ private fun loadRegistryIcon(url: String): ImageBitmap? {
 @Composable
 fun RepoModuleIcon(url: String?, modifier: Modifier = Modifier, size: Dp = 24.dp) {
     if (url == null) return
+    // 先读缓存；未命中时在 IO 线程拉取，url 变化会取消旧请求
     val bitmap by produceState(iconCache.get(url), url) {
         if (value == null) value = withContext(Dispatchers.IO) { loadRegistryIcon(url) }
     }

@@ -29,22 +29,29 @@ import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.preference.CheckboxLocation
 import top.yukonga.miuix.kmp.preference.CheckboxPreference
 
+/**
+ * Miuix 版 KMI 选择对话框。与 Material 版行为一致，区别是用 OverlayDialog + 可保存的选中状态：
+ * rememberSaveable 让进程重建后仍保留用户已选但未确认的项。
+ */
 @Composable
 fun ChooseKmiDialogMiuix(
     show: Boolean,
     onDismissRequest: () -> Unit,
     onSelected: (String?) -> Unit
 ) {
+    // 异步获取支持的 KMI 与当前 KMI，初始值保证首帧可渲染
     val supportedKMIs by produceState(initialValue = emptyList()) {
         value = getSupportedKmis()
     }
     val currentKmi by produceState(initialValue = "") {
         value = getCurrentKmi()
     }
+    // 用 rememberSaveable 保存未确认选择，配置变更/进程重建不丢失
     val currentSelection = rememberSaveable(currentKmi) { mutableStateOf(currentKmi) }
     OverlayDialog(
         show = show,
         title = stringResource(R.string.select_kmi),
+        // 当前 KMI 未知时用 Unknown 占位，避免摘要为空
         summary = stringResource(R.string.current_kmi, currentKmi.let { it.ifBlank { "Unknown" } }),
         onDismissRequest = {
             onDismissRequest()
@@ -52,6 +59,7 @@ fun ChooseKmiDialogMiuix(
         },
         insideMargin = DpSize(0.dp, 24.dp),
         content = {
+            // 限制最大高度，KMI 较多时列表内部滚动而非撑破对话框
             Column(modifier = Modifier.heightIn(max = 500.dp)) {
                 LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
                     items(supportedKMIs) { kmi ->
@@ -61,6 +69,7 @@ fun ChooseKmiDialogMiuix(
                             insideMargin = PaddingValues(horizontal = 30.dp, vertical = 16.dp),
                             checkboxLocation = CheckboxLocation.End,
                             checked = currentSelection.value == kmi,
+                            // 选中项保持按压态，形成单选视觉
                             holdDownState = currentSelection.value == kmi,
                             onCheckedChange = { _ ->
                                 currentSelection.value = kmi
@@ -83,6 +92,7 @@ fun ChooseKmiDialogMiuix(
                     )
                     Spacer(modifier = Modifier.width(20.dp))
                     TextButton(
+                        // 与 Material 版一致：仅允许确认受支持的 KMI
                         enabled = supportedKMIs.contains(currentSelection.value),
                         onClick = {
                             onSelected(currentSelection.value)

@@ -15,10 +15,12 @@ use crate::{apk_sign, defs};
 #[derive(Parser, Debug)]
 #[command(author, version = defs::VERSION_NAME, about, long_about = None)]
 struct Args {
+    /// 解析后的子命令，仅是宿主机可用的离线镜像处理能力。
     #[command(subcommand)]
     command: Commands,
 }
 
+/// 宿主机子命令集合；刻意保持精简，避免暴露仅设备可用的功能。
 #[derive(clap::Subcommand, Debug)]
 enum Commands {
     /// 修补 boot 或 init_boot 镜像以应用 KernelSU

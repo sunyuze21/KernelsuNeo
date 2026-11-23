@@ -4,6 +4,10 @@ import me.weishu.kernelsu.data.model.RepoModuleDetail
 import me.weishu.kernelsu.data.model.RepoModuleList
 import me.weishu.kernelsu.data.registry.UpdateVerification
 
+/**
+ * 模块仓库（KernelSU Modules 注册表）的读取入口。
+ * 所有方法都是 suspend 且内部切到 IO 线程；失败通过 [Result] 返回，不向 UI 抛异常。
+ */
 interface ModuleRepoRepository {
     /** Index + module list; falls back to the last complete cached copy on failure. */
     suspend fun fetchModules(): Result<RepoModuleList>

@@ -51,7 +51,7 @@ fn dump_process_info(label: &str) {
 ///
 /// `kmi` 在调用方已知内核 ABI 时覆盖自动检测结果；`allow_shell` 作为模块参数传入，最终成为
 /// 内核侧的宽松 shell 设置。函数会 daemonize，因此调用方返回成功只代表守护进程已启动。
-pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Result<()> {
+pub fn run_lkm_load(package_name: &str, kmi: Option<String>, allow_shell: bool) -> Result<()> {
     // 脱离 ADB/shell 会话；否则开机阶段脚本可能随调用方退出而被终止。
     utils::daemonize(false)?;
     info!("late-load command triggered!");
@@ -76,7 +76,8 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
 
         // 4. 从内存加载 kernelsu.ko 并手工重定位
         info!("Loading kernelsu.ko for KMI {kmi}...");
-        // 在越狱模式下 bundled 标志没有意义，因为无法通过刷写 boot 来更新它。
+        // 把内核模块直接注入当前内核；KMI 不匹配、签名或 seccomp 限制都会在这里失败。
+        // 越狱模式下 bundled 标志没有意义，因为无法通过刷写 boot 来更新它。
         let params = if allow_shell {
             cstr!("allow_shell=1")
         } else {
@@ -102,6 +103,7 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
     // 从自身可执行文件安装 ksud 及其 bin 资源，保证后续阶段脚本调用的是当前运行的版本。
     utils::install(None, None).context("Failed to install ksud")?;
 
+    // 清理热安装遗留的旧文件，避免阶段脚本加载到过期的二进制或模块副本。
     crate::hot_install::clean_trash();
 
     // 5. 处理模块更新

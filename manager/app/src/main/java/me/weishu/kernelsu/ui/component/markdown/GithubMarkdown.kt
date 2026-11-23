@@ -52,10 +52,30 @@ import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets
 import kotlin.math.abs
 
+// 受限模式下把应用内资源映射到这个虚拟源；同时它也充当普通模式文档的基准 URL
 private const val APP_ASSETS_ORIGIN = "https://appassets.androidplatform.net"
+// content-type 头的解析规则：先按分号取 MIME，再按等号取 charset，容忍多余空格
 private val SEMICOLON_SPLIT = ";\\s*".toRegex()
+// charset 段的等号拆分规则，与 SEMICOLON_SPLIT 配套使用
 private val EQUALS_SPLIT = "=\\s*".toRegex()
 
+/**
+ * 基于 WebView 的 Markdown 渲染组件。
+ *
+ * 普通模式开启 JavaScript 与 DOM 存储，并注册 AndroidScroll 桥接，用于让
+ * 宽表格/代码块的横向滚动与父级手势协同；受限模式（传入 [restrictedBaseUrl]）
+ * 则关闭 JS/存储、剥离 `<script>`、只放行同源子资源，且拦截页面内导航，
+ * 专门渲染来自模块仓库的不可信 README/更新日志。
+ *
+ * 解析与 HTML 渲染在组合阶段完成并 remember 缓存；加载到 WebView 时用 html
+ * 字符串作为 tag 去重，因此滚动、主题无关的重组不会触发重复 load，
+ * 只有内容或配色真正变化时才重新加载页面。
+ *
+ * @param content Markdown 源文本或已渲染好的 HTML
+ * @param isMarkdown 为 true 时走 commonmark 解析，否则把 content 当作 HTML
+ * @param onLoadingChange 页面开始加载/可见时回调，用于驱动外层淡入
+ * @param containerColor Miuix 模式下的内容底色，null 表示取主题默认
+ */
 @SuppressLint("JavascriptInterface", "SetJavaScriptEnabled", "WrongConstant")
 @Composable
 fun GithubMarkdown(
@@ -75,27 +95,34 @@ fun GithubMarkdown(
     restrictedBaseUrl: String? = null,
 ) {
     val restricted = restrictedBaseUrl != null
+    // 受限客户端按来源缓存，避免每次组合都重建 OkHttp 连接池与拦截器链
     val restrictedClient = remember(restrictedBaseUrl) { restrictedBaseUrl?.let(::restrictedResourceClient) }
     val density = LocalDensity.current
     val systemDensity = LocalResources.current.displayMetrics.density
     val fontScale = density.fontScale
     val pageScale = density.density / systemDensity
+    // WebView 的 textZoom 以系统密度为基准，这里按 Compose 密度/用户字体缩放补偿，
+    // 否则在大屏或改了字体大小的设备上，Markdown 字号会与周围 Compose 文本明显不一致
     val newTextZoom = (90 * pageScale * fontScale).toInt()
+    // JS 桥接对象需跨重组稳定，否则 onPageFinished 注入的脚本会指向旧实例
     val scrollInterface = remember { MarkdownScrollInterface() }
 
     val isDark = isInDarkTheme()
     val dir = if (LocalLayoutDirection.current == LayoutDirection.Rtl) "rtl" else "ltr"
 
+    // 代码块/表格隔行底色由主题色派生，保证两种 UI 模式下都有足够对比度
     val colors = getMarkdownColors(containerColor)
     val bgCode = colors.bgCode
     val bgRowAlt = colors.bgRowAlt
     val fgDefault = colors.fgDefault
     val fgLink = colors.fgLink
 
+    // 模板只在明暗主题切换时重新读取，避免每次重组都做 assets IO
     val template = remember(isDark) {
         val name = if (isDark) "webview/template_dark.html" else "webview/template.html"
         ksuApp.assets.open(name).bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
     }
+    // commonmark 扩展对象无状态，只构建一次；parser/renderer 也随之复用
     val extensions = remember {
         listOf(
             TablesExtension.create(),
@@ -105,12 +132,15 @@ fun GithubMarkdown(
         )
     }
     val parser = remember(extensions) { Parser.builder().extensions(extensions).build() }
+    // 受限模式额外开启 URL 清洗与 HTML 转义，防止不可信 README 注入脚本/外链
     val renderer = remember(extensions, restricted) {
         HtmlRenderer.builder().extensions(extensions).sanitizeUrls(restricted).escapeHtml(restricted).build()
     }
+    // 解析结果按内容和模式缓存：Markdown 解析是纯 CPU 操作，不应随滚动/重组重复执行
     val rendered = remember(content, isMarkdown) {
         if (isMarkdown) renderer.render(parser.parse(content)) else content
     }
+    // 把 Compose 主题色写进 CSS 变量；背景透明，让外层容器的底色/模糊效果透出
     val styleContent = """
         :root {
             --background: ${Color.TRANSPARENT};
@@ -129,6 +159,8 @@ fun GithubMarkdown(
     """.trimIndent()
     val html = template
         .let { t ->
+            // 受限模式需把内置样式表改写到资产源，并移除模板中的脚本；
+            // 文档 URL 仍用站点根，这样相对链接与 `#anchor` 都能按原站语义解析
             // The document URL is the registry site root (relative links resolve against it and
             // `#anchor` links stay in the same document); bundled stylesheets keep loading from
             // the asset loader.
@@ -179,6 +211,7 @@ fun GithubMarkdown(
                             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
                             .build()
 
+                        // 页面加载后注入滚动探测脚本，把宽表格/代码块的横向可滚动状态回传给原生手势仲裁
                         override fun onPageFinished(view: WebView, url: String) {
                             super.onPageFinished(view, url)
                             if (restricted) return
@@ -247,6 +280,7 @@ fun GithubMarkdown(
                             view.evaluateJavascript(js, null)
                         }
 
+                        // 所有导航都返回 true 表示“WebView 自己不跳转”；非受限模式把链接交给外部浏览器
                         override fun shouldOverrideUrlLoading(
                             view: WebView, request: WebResourceRequest
                         ): Boolean {
@@ -270,10 +304,12 @@ fun GithubMarkdown(
                             return true
                         }
 
+                        // 首帧可见即结束 loading 状态，比 onPageFinished 更早，能减少白屏时间
                         override fun onPageCommitVisible(view: WebView?, url: String?) {
                             onLoadingChange(false)
                         }
 
+                        // 子资源统一走代理：先尝试资产加载器，再按受限策略校验来源，最后用 OkHttp 拉取
                         override fun shouldInterceptRequest(
                             view: WebView, request: WebResourceRequest
                         ): WebResourceResponse? {
@@ -320,10 +356,12 @@ fun GithubMarkdown(
                     if (restricted) {
                         setOnTouchListener(RestrictedTouchHandler(this))
                     } else setOnTouchListener(object : View.OnTouchListener {
+                        // 锁定后本次手势期间不再向父级让渡，保证横向拖动不会被分页容器抢走
                         private var isHorizontalScrollLocked = false
                         private var initialDownX = 0f
                         private var initialDownY = 0f
 
+                        // 横向拖动优先交给 WebView 内部滚动；只有内部已滚到边界时才让父级接管
                         @SuppressLint("ClickableViewAccessibility")
                         override fun onTouch(v: View, event: MotionEvent): Boolean {
                             when (event.action) {
@@ -373,6 +411,7 @@ fun GithubMarkdown(
         update = { frameLayout ->
             val webView = frameLayout.getChildAt(0) as? WebView ?: return@AndroidView
             webView.settings.textZoom = newTextZoom
+            // 以 html 作为内容指纹：只有页面内容变化才重新 load，滚动重组不会触发重载
             if (webView.tag != html) {
                 webView.tag = html
                 onLoadingChange(true)
@@ -382,6 +421,7 @@ fun GithubMarkdown(
                 )
             }
         },
+        // 离开组合时主动停止加载并销毁 WebView，否则其渲染进程与 JS 上下文会一直驻留
         onRelease = { frameLayout ->
             val webView = frameLayout.getChildAt(0) as? WebView
             frameLayout.removeAllViews()
@@ -397,11 +437,13 @@ fun GithubMarkdown(
     )
 }
 
+/** 构造一个 403 空响应，用于静默拦截受限模式下不允许访问的资源 */
 private fun blockedResponse() = WebResourceResponse(
     "text/plain", "utf-8", 403, "Blocked", emptyMap(),
     ByteArrayInputStream(ByteArray(0))
 )
 
+// 按来源缓存受限客户端：OkHttpClient 自带连接池与线程，重复创建代价高且会泄漏资源
 private val restrictedClients = java.util.concurrent.ConcurrentHashMap<String, OkHttpClient>()
 
 /**
@@ -427,8 +469,10 @@ private fun restrictedResourceClient(origin: String): OkHttpClient = restrictedC
  * JavaScript, so the restricted renderer can still scroll wide tables and code blocks.
  */
 private class EdgeAwareWebView(context: android.content.Context) : WebView(context) {
+    // 由 onOverScrolled 置位：表示本次横向拖动已到达页面滚动边界，可交还父级手势
     var horizontalEdgeReached = false
 
+    /** 当横向滚动被钳制时标记“已到边界”，供触摸仲裁读取 */
     override fun onOverScrolled(scrollX: Int, scrollY: Int, clampedX: Boolean, clampedY: Boolean) {
         super.onOverScrolled(scrollX, scrollY, clampedX, clampedY)
         if (clampedX) horizontalEdgeReached = true
@@ -443,11 +487,13 @@ private class EdgeAwareWebView(context: android.content.Context) : WebView(conte
 private class RestrictedTouchHandler(
     private val webView: EdgeAwareWebView,
 ) : View.OnTouchListener {
+    // 用系统 touchSlop 判定方向，避免手指轻微抖动就把手势判成横向，导致页面无法纵向滚动
     private val touchSlop = android.view.ViewConfiguration.get(webView.context).scaledTouchSlop
     private var downX = 0f
     private var downY = 0f
     private var direction = 0 // 0 undecided, 1 horizontal, 2 vertical
 
+    /** 方向判定完成后按方向决定是否拦截：纵向立即让给父级，横向等页面到边界再让出 */
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouch(v: View, event: MotionEvent): Boolean {
         when (event.actionMasked) {
@@ -483,13 +529,22 @@ private class RestrictedTouchHandler(
     }
 }
 
+/**
+ * JavaScript 与原生之间的滚动状态桥。
+ *
+ * 字段用 @Volatile 修饰：写入发生在 WebView 的 JS 线程，读取发生在 UI 线程，
+ * 需要保证可见性；布尔读写本身原子，因此无需再加锁。
+ */
 class MarkdownScrollInterface {
+    /** 内部可横向滚动的元素当前是否还能继续向左滚 */
     @Volatile
     var canScrollLeft = false
 
+    /** 内部可横向滚动的元素当前是否还能继续向右滚 */
     @Volatile
     var canScrollRight = false
 
+    /** 由注入脚本在滚动状态变化时调用，仅在状态确实改变时才回调以降低跨线程开销 */
     @JavascriptInterface
     fun updateScrollState(left: Boolean, right: Boolean) {
         canScrollLeft = left
@@ -497,6 +552,7 @@ class MarkdownScrollInterface {
     }
 }
 
+/** Markdown 页面所需的一组 CSS 颜色字符串，由主题色派生后注入模板 */
 private data class MarkdownColors(
     val bgCode: String,
     val bgRowAlt: String,
@@ -504,6 +560,13 @@ private data class MarkdownColors(
     val fgLink: String
 )
 
+/**
+ * 按当前 UI 模式生成 Markdown 配色。
+ *
+ * Material 直接取 colorScheme；Miuix 没有对应的代码块/隔行色 token，
+ * 因此从容器底色做亮度微调，并用 `ensureVisibleByMix` 保证与底色的对比度，
+ * 避免深色主题下代码块“糊”进背景。
+ */
 @Composable
 private fun getMarkdownColors(containerColor: androidx.compose.ui.graphics.Color?): MarkdownColors {
     val uiMode = LocalUiMode.current
@@ -520,8 +583,10 @@ private fun getMarkdownColors(containerColor: androidx.compose.ui.graphics.Color
 
         UiMode.Miuix -> {
             val bgArgb = containerColor?.toArgb() ?: MiuixTheme.colorScheme.surfaceContainer.toArgb()
+            // 亮度决定微调方向：浅底压暗、深底提亮，否则色块会向背景“靠拢”而不可见
             val bgLuminance = relativeLuminance(bgArgb)
 
+            /** 在底色基础上偏移亮度，并混入底色调直到满足最小可见对比度 */
             fun makeVariant(delta: Float, ratio: Double): Int {
                 val candidate = adjustLightnessArgb(bgArgb, delta)
                 val madeLighter = delta > 0f

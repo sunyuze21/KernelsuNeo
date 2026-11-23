@@ -38,6 +38,15 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
+/**
+ * 日志保存/分享对话框（miuix 风格）。
+ *
+ * 与 Material 版不同，这里用 Toast 反馈保存结果，不依赖外层 Snackbar。
+ * 导出在 IO 线程执行，loading 对话框由调用方注入以便与应用其他位置共用。
+ * SAF 返回 null 表示用户取消，此时静默返回，不能弹出成功提示。
+ *
+ * @param loadingDialog 外部持有的 loading 句柄，用于导出期间阻塞交互
+ */
 @Composable
 fun SendLogDialog(
     show: Boolean,
@@ -48,6 +57,7 @@ fun SendLogDialog(
     val scope = rememberCoroutineScope()
     val logSavedText = stringResource(R.string.log_saved)
     val sendLogText = stringResource(R.string.send_log)
+    // 文件名在启动 SAF 时就要确定，因此先用当前时间生成带时间戳的名称
     val exportBugreportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/gzip")
     ) { uri: Uri? ->
@@ -118,12 +128,15 @@ fun SendLogDialog(
                         }
 
                         val uri: Uri =
+                            // FileProvider 授权是分享文件给其他应用的唯一安全途径，
+                            // 配合 FLAG_GRANT_READ_URI_PERMISSION 才能让对方读取
                             FileProvider.getUriForFile(
                                 context,
                                 "${BuildConfig.APPLICATION_ID}.fileprovider",
                                 bugreport
                             )
 
+                        // EXTRA_STREAM + 读权限是分享文件的标准组合；用 chooser 让用户选择目标应用
                         val shareIntent = Intent(Intent.ACTION_SEND).apply {
                             putExtra(Intent.EXTRA_STREAM, uri)
                             setDataAndType(uri, "application/gzip")

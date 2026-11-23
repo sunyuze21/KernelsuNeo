@@ -5,15 +5,21 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/** 验证更新校验策略：registry release 需哈希匹配，非 registry 模块保持 legacy 行为。 */
 class RegistryUpdatePolicyTest {
 
+    // 使用默认 base URL，确保与生产环境同源判断一致。
     private val base = RegistryUrls.DEFAULT_BASE_URL
+    // 两种 update.json 来源：registry 托管与作者自建（raw.githubusercontent）。
     private val registryUpdateJson = "https://modules.kernelsu.org/api/v1/modules/foo/update.json"
     private val authorUpdateJson = "https://raw.githubusercontent.com/owner/repo/main/update.json"
+    // 两个不同哈希，用于区分 v1/v2 release。
     private val sha1 = "1".repeat(64)
     private val sha2 = "2".repeat(64)
+    // 按 tag 生成 GitHub release 下载地址，保持 owner/repo 固定。
     private fun zip(tag: String) = "https://github.com/owner/repo/releases/download/$tag/foo.zip"
 
+    // 构造 ApiRelease；zip 大小随 versionCode 变化，便于断言取到的是哪一个 release。
     private fun release(tag: String, versionCode: Int, sha: String, url: String = zip(tag)) = ApiRelease(
         tag = tag, version = tag, versionCode = versionCode, prerelease = false,
         publishedAt = "2026-10-01T00:00:00Z", changelogHtml = "<p>$tag</p>",
@@ -22,6 +28,7 @@ class RegistryUpdatePolicyTest {
         immutable = true,
     )
 
+    // 固定详情：包含 v2(200) 与 v1(100) 两个 release，供大多数用例复用。
     private val detail = ApiModuleDetail(
         schemaVersion = 1, buildId = "1".repeat(16), id = "foo", name = "Foo",
         stable = ApiVersionRef("v2", 200, "2026-10-01T00:00:00Z"), detail = "api/v1/modules/foo.json",
@@ -30,6 +37,7 @@ class RegistryUpdatePolicyTest {
         releases = listOf(release("v2", 200, sha2), release("v1", 100, sha1)),
     )
 
+    // 统一入口：默认参数代表“registry 托管的 v2 更新”，个别用例只覆盖关心的一项。
     private fun decide(
         updateJson: String = registryUpdateJson,
         zipUrl: String = zip("v2"),
@@ -38,6 +46,7 @@ class RegistryUpdatePolicyTest {
         d: ApiModuleDetail? = detail,
     ) = RegistryUpdatePolicy.decide(base, updateJson, zipUrl, versionCode, inIndex, d)
 
+    // registry release 必须给出期望哈希/大小；作者自建 updateJson 指向 registry release 时同样要校验。
     @Test
     fun registryReleaseIsVerified() {
         val v = decide() as UpdateVerification.Registry
@@ -51,15 +60,18 @@ class RegistryUpdatePolicyTest {
         assertTrue(decide(zipUrl = "HTTPS://GitHub.com/owner/repo/releases/download/v2/foo.zip") is UpdateVerification.Registry)
     }
 
+    // 多个 release 共用同一 URL 时，必须用 versionCode 区分，不能取第一个匹配项。
     @Test
     fun versionCodePicksBetweenReleasesSharingAUrl() {
         val shared = "https://github.com/owner/repo/releases/download/latest/foo.zip"
         val d = detail.copy(releases = listOf(release("v2", 200, sha2, shared), release("v1", 100, sha1, shared)))
         assertEquals(ExpectedFile(200, sha1), (decide(zipUrl = shared, versionCode = 100, d = d) as UpdateVerification.Registry).expected)
         assertEquals(ExpectedFile(300, sha2), (decide(zipUrl = shared, versionCode = 200, d = d) as UpdateVerification.Registry).expected)
+        // versionCode 在 registry 中不存在时拒绝，避免静默降级。
         assertTrue(decide(zipUrl = shared, versionCode = 999, d = d) is UpdateVerification.Rejected)
     }
 
+    // 把 v1 ZIP 当作 versionCode 200 下发属于静默降级，必须拒绝。
     @Test
     fun registryZipWithAnotherVersionCodeIsRejected() {
         // The v1 ZIP offered as versionCode 200 would be a silent downgrade.
@@ -74,6 +86,7 @@ class RegistryUpdatePolicyTest {
         )
     }
 
+    // 仓库改名后 release URL 仍保留旧 owner/repo，这类历史 URL 不能简单按名称拒绝。
     @Test
     fun releaseOfARenamedRepositoryIsStillVerified() {
         // Release URLs keep the owner/repo they were listed under.
@@ -83,11 +96,13 @@ class RegistryUpdatePolicyTest {
         assertEquals(ExpectedFile(300, sha2), v.expected)
     }
 
+    // 与 registry 无关的 URL 不应因缺少 registry 数据而被拒绝，保持 legacy 行为。
     @Test
     fun unrelatedUpdatesAreLegacyWithoutRegistryData() {
         val zips = listOf("https://example.com/foo.zip", "https://raw.githubusercontent.com/owner/repo/main/foo.zip", "not a url")
         for (zipUrl in zips) {
             assertTrue(zipUrl, RegistryUpdatePolicy.isUnrelatedToRegistry(base, authorUpdateJson, zipUrl))
+            // inIndex 与详情有无都不影响该判断。
             for (inIndex in listOf(true, false, null)) for (d in listOf(detail, null)) {
                 assertEquals(zipUrl, UpdateVerification.Legacy, decide(authorUpdateJson, zipUrl, 200, inIndex, d))
             }
@@ -98,6 +113,7 @@ class RegistryUpdatePolicyTest {
         assertFalse(RegistryUpdatePolicy.isUnrelatedToRegistry(base, registryUpdateJson, "https://example.com/foo.zip"))
     }
 
+    // 不在索引中的模块以及作者自建的非 registry ZIP，继续走 legacy，不受新校验影响。
     @Test
     fun nonRegistryModulesStayLegacy() {
         assertEquals(UpdateVerification.Legacy, decide(updateJson = authorUpdateJson, inIndex = false, d = null))
@@ -108,6 +124,7 @@ class RegistryUpdatePolicyTest {
         assertEquals(UpdateVerification.Legacy, decide(updateJson = authorUpdateJson, zipUrl = zip("v2") + "?x=1"))
     }
 
+    // registry 托管的更新若找不到对应 release，必须拒绝而不是回退到未校验下载。
     @Test
     fun unmatchedRegistryHostedUpdatesAreRejected() {
         assertTrue(decide(zipUrl = "https://example.com/foo.zip") is UpdateVerification.Rejected)

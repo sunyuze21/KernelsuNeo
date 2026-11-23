@@ -2,6 +2,18 @@
 
 package me.weishu.kernelsu.ui.component.miuix.effect
 
+/**
+ * 动态背景的 AGSL 片元着色器源码。
+ *
+ * 输入包括分辨率、动画时间、可选裁剪边界、四个控制点的位置/半径/颜色，
+ * 以及亮度、饱和度、点半径等强度系数。着色逻辑为：
+ * 1. 把屏幕坐标归一化到裁剪区域，逐点用 `smoothstep` 混合四个径向色团；
+ * 2. 用 Perlin 噪声做反向“去饱和 + 提亮”，制造磨砂玻璃般的颗粒层次；
+ * 3. 叠加上下 5/255 的梯度噪声抖动，消除大面积渐变的色带。
+ *
+ * 源码以字符串形式在运行时编译，因此所有 uniform 名称必须与 [BgEffectPainter]
+ * 中的设置严格一致，修改任一侧都要同步。
+ */
 const val OS3_BG_FRAG = """
     uniform vec2 uResolution;
     uniform float uAnimTime;

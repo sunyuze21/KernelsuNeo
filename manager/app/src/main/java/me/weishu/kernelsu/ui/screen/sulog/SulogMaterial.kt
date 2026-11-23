@@ -78,6 +78,10 @@ import me.weishu.kernelsu.ui.component.statustag.StatusTag
 import me.weishu.kernelsu.ui.util.SulogEntry
 import me.weishu.kernelsu.ui.util.SulogEventFilter
 
+/**
+ * Material 3 主题下的 SuLog 页面：状态横幅、日志文件选择、事件过滤、
+ * 搜索与下拉刷新，点击条目查看完整字段。
+ */
 @Composable
 fun SulogScreenMaterial(
     state: SulogScreenState,
@@ -85,14 +89,17 @@ fun SulogScreenMaterial(
 ) {
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
     val pullToRefreshState = rememberPullToRefreshState()
+    // 主列表与搜索结果各用独立滚动状态
     val listState = rememberLazyListState()
     val searchListState = rememberLazyListState()
     val haptic = LocalHapticFeedback.current
     val fileSelector = buildSulogFileSelector(state.files, state.selectedFilePath)
+    // 非空时弹出详情对话框；详情内容来自当前选中条目
     var selectedEntry by remember { mutableStateOf<SulogEntry?>(null) }
     var showFilterMenu by remember { mutableStateOf(false) }
     var localSearchText by remember { mutableStateOf(state.searchText) }
 
+    // ViewModel 清空/切换搜索词时同步输入框
     LaunchedEffect(state.searchText) {
         localSearchText = state.searchText
     }
@@ -130,6 +137,7 @@ fun SulogScreenMaterial(
                             contentDescription = stringResource(R.string.sulog_clean_title),
                         )
                     }
+                    // 过滤器为多选，勾选状态直接来自 selectedFilters 集合
                     IconButton(onClick = { showFilterMenu = true }) {
                         Icon(
                             imageVector = Icons.Filled.FilterList,
@@ -165,6 +173,7 @@ fun SulogScreenMaterial(
                 },
                 scrollBehavior = scrollBehavior,
                 searchContent = { bottomPadding, _ ->
+                    // 用 rememberUpdatedState 让 ScrollToTopOnChange 读取最新结果而不重启副作用
                     val latestVisibleEntries = rememberUpdatedState(state.visibleEntries)
                     ScrollToTopOnChange(
                         searchListState,
@@ -210,6 +219,7 @@ fun SulogScreenMaterial(
                 )
             },
         ) {
+            // 过滤条件或日志文件切换后回到顶部，避免停留在旧日志位置
             val latestEntries = rememberUpdatedState(state.visibleEntries)
             ScrollToTopOnChange(
                 listState,
@@ -267,6 +277,10 @@ fun SulogScreenMaterial(
     }
 }
 
+/**
+ * 向 LazyColumn 追加日志条目区块；加载失败时改为整屏错误卡片，
+ * 避免错误信息与空列表同时出现造成误解。
+ */
 private fun LazyListScope.sulogEntriesSection(
     entries: List<SulogEntry>,
     errorMessage: String?,
@@ -282,6 +296,7 @@ private fun LazyListScope.sulogEntriesSection(
         }
 
         else -> {
+            // key 中加入 index，防止同一事件在多文件中重复导致 key 冲突
             itemsIndexed(entries, key = { index, entry -> "$index-${entry.key}" }) { index, entry ->
                 SegmentedItem(index = index, count = entries.size) {
                     SegmentedListItem(
@@ -310,6 +325,7 @@ private fun LazyListScope.sulogEntriesSection(
                                     )
                                 }
                                 Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    // 标签按顺序轮换主题色，超出数量时复用最后一组配色
                                     val colors = listOf(
                                         colorScheme.primary to colorScheme.onPrimary,
                                         colorScheme.secondary to colorScheme.onSecondary,
@@ -332,6 +348,10 @@ private fun LazyListScope.sulogEntriesSection(
     }
 }
 
+/**
+ * 根据内核特性状态展示横幅：不支持/被托管/被强制时仅提示，
+ * supported 但未启用时提供一键开启入口。
+ */
 @Composable
 private fun SulogStatusSection(
     state: SulogScreenState,
@@ -371,6 +391,7 @@ private fun SulogStatusSection(
     }
 }
 
+/** 居中的空态/错误态卡片；summary 可省略，长文本最多显示三行。 */
 @Composable
 private fun SulogMessageCard(
     modifier: Modifier,
@@ -396,6 +417,7 @@ private fun SulogMessageCard(
     }
 }
 
+/** 错误色横幅；[action] 为空时只显示提示文本。 */
 @Composable
 private fun WarningCard(
     text: String,
@@ -422,6 +444,7 @@ private fun WarningCard(
     }
 }
 
+/** 日志详情弹窗；正文放在 SelectionContainer 中，允许用户复制字段排查问题。 */
 @Composable
 private fun SulogDetailDialog(
     entry: SulogEntry,

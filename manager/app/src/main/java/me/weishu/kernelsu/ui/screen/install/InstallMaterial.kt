@@ -50,6 +50,9 @@ import me.weishu.kernelsu.ui.component.material.expressiveTopAppBarColors
 import me.weishu.kernelsu.ui.util.LkmSelection
 
 /**
+ * Material 3 主题下的安装页：分区选择、LKM 上传、高级选项与下一步按钮。
+ * 仅负责渲染 [InstallUiState]，所有副作用通过 [InstallScreenActions] 上抛。
+ *
  * @author weishu
  * @date 2024/3/12.
  */
@@ -59,6 +62,7 @@ internal fun InstallScreenMaterial(
     actions: InstallScreenActions,
     snackBarHost: SnackbarHostState,
 ) {
+    // 列表滚动时顶部大标题渐隐，进入折叠状态
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
 
     ExpressiveScaffold(
@@ -89,6 +93,7 @@ internal fun InstallScreenMaterial(
             SegmentedColumn(
                 modifier = Modifier.padding(horizontal = 16.dp),
                 content = buildList {
+                    // 下载方式使用远端 zip 探测出的分区列表，其余使用本机分区
                     val isDownload = uiState.installMethod is InstallMethod.DownloadFile
                     val partitionItems = if (isDownload) {
                         uiState.remoteDisplayPartitions
@@ -114,6 +119,7 @@ internal fun InstallScreenMaterial(
                             icon = Icons.Filled.Edit
                         )
                     }
+                    // 仅选文件安装时提供强制备份，避免对直接安装产生误导
                     if (uiState.canForceBackup) add {
                         SegmentedCheckboxItem(
                             title = stringResource(R.string.install_force_backup),
@@ -163,6 +169,7 @@ internal fun InstallScreenMaterial(
                 modifier = Modifier.padding(horizontal = 16.dp),
             ) {
                 item {
+                    // 展开状态用箭头 180° 旋转表示，动画仅影响图标
                     val rotationState by animateFloatAsState(
                         targetValue = if (uiState.advancedOptionsShown) 180f else 0f,
                         label = "RotationAnimation"
@@ -196,6 +203,7 @@ internal fun InstallScreenMaterial(
                     )
                 }
             }
+            // 未选择安装方式前禁用“下一步”，避免进入刷写页时参数缺失
             Button(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -207,6 +215,10 @@ internal fun InstallScreenMaterial(
     }
 }
 
+/**
+ * 渲染安装方式单选列表。选择文件/下载会先触发外部流程，真正的安装方式
+ * 由后续回调确定；OTA 安装因会改动非活动槽位，需二次确认。
+ */
 @Composable
 private fun SelectInstallMethod(
     state: InstallUiState,
@@ -232,6 +244,7 @@ private fun SelectInstallMethod(
         }
     }
 
+    // 选项数量随设备能力变化，用 size 作为 key 强制重建列表项状态
     key(state.installMethodOptions.size) {
         SegmentedColumn(
             modifier = Modifier.padding(horizontal = 16.dp),
@@ -249,6 +262,7 @@ private fun SelectInstallMethod(
     }
 }
 
+/** 安装页顶部栏；滚动行为由调用方注入，便于与列表共享折叠状态。 */
 @Composable
 private fun TopBar(
     onBack: () -> Unit = {},

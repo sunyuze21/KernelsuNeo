@@ -10,6 +10,7 @@ import me.weishu.kernelsu.ui.component.SearchStatus
 import java.text.Collator
 import java.util.Locale
 
+/** 仓库列表支持的排序方式；顺序变化会影响旧版本序号的迁移，勿随意调整。 */
 enum class RepoSort {
     UPDATED,
     NAME,
@@ -21,6 +22,7 @@ enum class RepoSort {
         return when (this) {
             UPDATED -> modules.sortedByDescending { it.latestReleaseEpoch }
             NAME -> {
+                // 按系统语言排序，保证非英文模块名符合本地阅读习惯
                 val collator = Collator.getInstance(locale)
                 modules.sortedWith(compareBy(collator) { it.moduleName })
             }
@@ -38,6 +40,7 @@ enum class RepoSort {
          * longer exists and falls back to UPDATED).
          */
         fun fromStored(name: String?, legacyOrdinal: Int?): RepoSort {
+            // 优先按名称匹配，兼容后续新增排序项；名称缺失时再按旧序号迁移
             name?.let { n -> entries.firstOrNull { it.name == n }?.let { return it } }
             return when (legacyOrdinal) {
                 2 -> NAME
@@ -48,6 +51,7 @@ enum class RepoSort {
     }
 }
 
+/** 仓库页的 UI 快照；列表与搜索状态相互独立，便于退出搜索后恢复。 */
 data class ModuleRepoUiState(
     val isRefreshing: Boolean = false,
     /** A module list (possibly empty) has been loaded at least once. */
@@ -66,6 +70,7 @@ data class ModuleRepoUiState(
     /** Message to show instead of the list when it is empty or could not be loaded, or null while loading. */
     val emptyStateMessage: Int?
         get() = when {
+            // 已有内容或正在首次刷新时不显示空态/错误文案，避免闪烁
             modules.isNotEmpty() || isRefreshing && !offline -> null
             error is UnsupportedSchemaException -> R.string.module_repo_unsupported_schema
             offline -> R.string.network_offline
@@ -80,6 +85,7 @@ data class ModuleRepoUiState(
  * (rounded down) keeps it independent of the device locale, like GitHub's own counters.
  */
 fun formatStarCount(count: Int): String {
+    /** 以千/M 为单位压缩，tenths 为保留一位小数的整数表示，避免浮点误差。 */
     fun compact(value: Int, unit: Int, suffix: String): String {
         if (value >= unit * 100) return "${value / unit}$suffix"
         val tenths = value / (unit / 10)
@@ -103,12 +109,14 @@ enum class RepoInstallState { NONE, INSTALLED, UPDATABLE }
 fun repoInstallStateOf(module: RepoModule, installedVersions: Map<String, Int>): RepoInstallState =
     if (module.isScript) RepoInstallState.NONE else repoInstallState(installedVersions[module.moduleId], module.latestVersionCode)
 
+/** 由本地已装版本号与仓库最新版本号推导徽标状态；版本号相同即视为已是最新。 */
 fun repoInstallState(installedVersionCode: Int?, latestVersionCode: Int): RepoInstallState = when {
     installedVersionCode == null -> RepoInstallState.NONE
     latestVersionCode > installedVersionCode -> RepoInstallState.UPDATABLE
     else -> RepoInstallState.INSTALLED
 }
 
+/** 仓库列表页的回调集合；Material/Miuix 两套 UI 共用。 */
 @Immutable
 data class ModuleRepoActions(
     val onBack: () -> Unit,
@@ -120,6 +128,7 @@ data class ModuleRepoActions(
     val onOpenRepoDetail: (RepoModule) -> Unit,
 )
 
+/** 仓库详情页的 UI 状态；detail 为空表示仍在加载或加载失败。 */
 @Immutable
 data class ModuleRepoDetailUiState(
     val module: RepoModuleArg,
@@ -132,13 +141,16 @@ data class ModuleRepoDetailUiState(
     /** Last local run, for scripts. */
     val lastRun: ScriptRunRecord? = null,
 ) {
+    /** 仓库提供的外部主页；未加载完成时为空串。 */
     val webUrl: String get() = detail?.webUrl.orEmpty()
 
     /** One-shot script: releases are run, not installed. */
     val isScript: Boolean get() = detail?.module?.isScript ?: module.script
+    /** 只有详情加载成功且模块仍在索引中时才允许安装，避免安装下架模块。 */
     val canInstall: Boolean get() = detail != null && !notInIndex
 }
 
+/** 仓库详情页的回调集合。 */
 @Immutable
 data class ModuleRepoDetailActions(
     val onBack: () -> Unit,

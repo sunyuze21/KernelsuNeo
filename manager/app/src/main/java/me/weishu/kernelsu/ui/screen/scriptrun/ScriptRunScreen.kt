@@ -58,6 +58,7 @@ fun ScriptRunScreen(arg: ScriptRunArg, onBackEnabledChange: (Boolean) -> Unit) {
     val viewModel = viewModel<ScriptRunViewModel>(key = "script-run-${arg.uri}-${arg.registryId}")
     val state by viewModel.state.collectAsStateWithLifecycle()
 
+    // 每次进入页面生成新的访问 id，用于区分重复进入并触发重新加载脚本。
     val visit = rememberSaveable { UUID.randomUUID().toString() }
     LaunchedEffect(arg, visit) { viewModel.load(arg, visit) }
     // The script cannot be stopped: no back (gesture included) and no swipe-dismiss while it runs.
@@ -76,6 +77,7 @@ fun ScriptRunScreen(arg: ScriptRunArg, onBackEnabledChange: (Boolean) -> Unit) {
 
     if (state.phase == ScriptRunPhase.RUNNING || state.phase == ScriptRunPhase.FINISHED) {
         val snackbarHost = remember { SnackbarHostState() }
+        // 输出阶段复用 action 页的提示通道：Material 用 Snackbar，Miuix 用 Toast。
         val showMessage: (String) -> Unit = { message ->
             scope.launch {
                 if (uiMode == UiMode.Material) {
@@ -87,6 +89,7 @@ fun ScriptRunScreen(arg: ScriptRunArg, onBackEnabledChange: (Boolean) -> Unit) {
         }
         val finished = state.phase == ScriptRunPhase.FINISHED
         val exitCode = state.exitCode
+        // exit code 到结果语义的映射由 ScriptOutcome 统一处理，避免各端判断不一致。
         val notice = if (finished && exitCode != null) {
             when (ScriptOutcome.of(exitCode)) {
                 ScriptOutcome.SUCCESS -> ActionResultNotice(ActionResultKind.SUCCESS, stringResource(R.string.script_result_success))
@@ -124,12 +127,14 @@ fun ScriptRunScreen(arg: ScriptRunArg, onBackEnabledChange: (Boolean) -> Unit) {
 
     val confirmDialog = rememberConfirmDialog(onConfirm = { viewModel.run() })
     val confirmTitle = stringResource(R.string.script_run_title)
+    // 确认文案带上 manifest 名称，让用户在真正执行前再次确认脚本身份。
     val confirmContent = stringResource(R.string.script_run_confirm, state.prepared?.manifest?.name.orEmpty())
     val confirmButton = stringResource(R.string.script_run)
     val actions = ScriptRunActions(
         onBack = dropUnlessResumed { navigator.pop() },
         onValueChange = viewModel::setValue,
         onRun = {
+            // 参数校验未通过时 canRun 为 false，不允许弹出确认框。
             if (state.canRun) {
                 confirmDialog.showConfirm(title = confirmTitle, content = confirmContent, confirm = confirmButton)
             }
@@ -145,6 +150,12 @@ fun ScriptRunScreen(arg: ScriptRunArg, onBackEnabledChange: (Boolean) -> Unit) {
     }
 }
 
+/**
+ * 把参数校验错误映射成本地化文案。
+ *
+ * 错误枚举来自 [ParamError]，但具体上下界需要回读参数定义（如文本最大长度、
+ * 整数 min/max）；类型不匹配时退回 0，保证提示始终可展示而不会崩溃。
+ */
 @Composable
 internal fun paramErrorText(param: ScriptParam, error: ParamError): String = when (error) {
     ParamError.REQUIRED -> stringResource(R.string.script_param_required)
@@ -156,8 +167,10 @@ internal fun paramErrorText(param: ScriptParam, error: ParamError): String = whe
     ParamError.INVALID_OPTION, ParamError.INVALID_BOOLEAN -> stringResource(R.string.script_param_invalid)
 }
 
+/** 生成“最近一次运行”描述；没有记录时显示从未运行。 */
 internal fun lastRunText(context: Context, record: ScriptRunRecord?): String {
     if (record == null) return context.getString(R.string.script_never_run)
+    // 使用系统区域设置格式化时间，避免固定格式在不同语言下难以阅读。
     val time = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(record.time))
     return if (record.versionCode != null) {
         context.getString(R.string.script_last_run_version, time, record.versionCode, record.exitCode)

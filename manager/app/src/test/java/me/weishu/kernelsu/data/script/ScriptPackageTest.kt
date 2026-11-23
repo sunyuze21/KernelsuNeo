@@ -13,21 +13,30 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.io.FileInputStream
 
+/** 覆盖 oneshot 脚本包的解析、校验与解压：条目名、符号链接/设备文件、大小上限与原子解压。 */
 class ScriptPackageTest {
 
+    /** JUnit 临时目录规则：ZIP 与解压目标都落在独立目录，便于断言无残留。 */
     @get:Rule
     val tmp = TemporaryFolder()
 
+    // 最小合法 module.prop：含 oneshot=true，是大部分验证用例的基准。
     private val prop = "id=my_script\nname=My Script\nversion=v1\nversionCode=3\nauthor=Alice\ndescription=Does a thing\noneshot=true\n"
 
+    // 测试用 ZIP 条目抽象：文件/符号链接/目录，便于精确控制 unix mode。
     private sealed class Entry(val name: String) {
+        // 普通文件条目；mode 为 null 时使用 ZIP 默认权限。
         class FileEntry(name: String, val data: ByteArray, val mode: Int? = null) : Entry(name)
+        // 符号链接条目，target 写入条目内容（ZIP 约定）。
         class Symlink(name: String, val target: String) : Entry(name)
+        // 目录条目，名称通常以 '/' 结尾。
         class Dir(name: String) : Entry(name)
     }
 
+    // 以文本构造文件条目，减少测试里的 ByteArray 噪音。
     private fun file(name: String, text: String, mode: Int? = null) = Entry.FileEntry(name, text.toByteArray(), mode)
 
+    // 把条目写成真实 ZIP；符号链接使用 0xA1FF（S_IFLNK | 0777）。
     private fun zip(vararg entries: Entry): File {
         val f = tmp.newFile()
         ZipArchiveOutputStream(f).use { out ->
@@ -41,6 +50,7 @@ class ScriptPackageTest {
                     }
 
                     is Entry.Symlink -> {
+                        // 0xA1FF = S_IFLNK(0120000) | 0777，解压器必须拒绝还原链接。
                         entry.unixMode = 0xA1FF
                         out.putArchiveEntry(entry)
                         out.write(e.target.toByteArray())
@@ -54,13 +64,16 @@ class ScriptPackageTest {
         return f
     }
 
+    // 合法包：module.prop + action.sh，extra 用于追加待测条目。
     private fun validZip(vararg extra: Entry) = zip(file("module.prop", prop), file("action.sh", "echo hi\n"), *extra)
 
+    // 断言抛出指定 reason 的 ScriptPackageException，避免只比较异常类型。
     private fun assertReason(reason: ScriptPackageException.Reason, block: () -> Unit) {
         val e = assertThrows(ScriptPackageException::class.java) { block() }
         assertEquals(reason, e.reason)
     }
 
+    // oneshot 布尔语义需与 ksud 一致：仅 true/1（忽略大小写与空白）为真。
     @Test
     fun oneshotFlagMatchesKsudBooleanRule() {
         assertTrue(ScriptPackage.isOneshot("true"))
@@ -73,11 +86,13 @@ class ScriptPackageTest {
         assertFalse(ScriptPackage.isOneshot(null))
     }
 
+    // module.prop 解析需与 ksud/Java properties 行为一致：后出现的重复键覆盖前值。
     @Test
     fun parsesModuleProp() {
         // Java properties, like ksud: later duplicates win, `:` / whitespace separators, BOM dropped.
         val props = ScriptPackage.parseModuleProp("\uFEFF# comment\r\nid = first\r\nname=Name = with eq\nid=a.b\nauthor: Bob\nversion v1\n")
         assertEquals("a.b", props["id"])
+        // 值中的 '=' 只保留为值的一部分，不能再次分割。
         assertEquals("Name = with eq", props["name"])
         assertEquals("Bob", props["author"])
         assertEquals("v1", props["version"])
@@ -87,6 +102,7 @@ class ScriptPackageTest {
         assertEquals(ScriptManifest("my_script", "My Script", "v1", 3, "Alice", "Does a thing"), m)
     }
 
+    // 条目名规范化只删除空段和 "."，但必须拒绝 ".."、绝对路径、反斜杠与控制字符。
     @Test
     fun normalizesEntryNames() {
         // Like ksud's zip crate and the registry validator: empty and "." segments are dropped.
@@ -95,12 +111,14 @@ class ScriptPackageTest {
         assertEquals("action.sh", ScriptPackage.normalizeEntryName("./action.sh"))
         assertEquals("lib/x", ScriptPackage.normalizeEntryName("lib//./x"))
         assertEquals("", ScriptPackage.normalizeEntryName("./"))
+        // 以点开头或中间含 ".." 的普通名字是安全的，不能误杀。
         for (ok in listOf(".hidden", "a..b")) assertEquals(ok, ScriptPackage.normalizeEntryName(ok))
         for (bad in listOf("", "/abs", "../x", "a/../b", "a/..", "a\\b", "a\u0000", "a\nb", "..")) {
             assertReason(ScriptPackageException.Reason.UNSAFE_ENTRY) { ScriptPackage.normalizeEntryName(bad) }
         }
     }
 
+    // 非规范但安全的条目名（./、//）应被接受并正确解压到规范路径。
     @Test
     fun acceptsNonCanonicalEntryNames() {
         val z = zip(file("./module.prop", prop), Entry.Dir("./"), file("./action.sh", "echo hi\n"), file("lib//x", "x"))
@@ -114,6 +132,7 @@ class ScriptPackageTest {
         assertReason(ScriptPackageException.Reason.UNSAFE_ENTRY) { ScriptPackage.validate(validZip(file("./action.sh", "dup"))) }
     }
 
+    // 合法包解压后保持目录结构；可执行位按 mode 还原，setuid 位必须丢弃；重复解压会替换旧内容。
     @Test
     fun validatesAndExtractsScript() {
         val z = validZip(
@@ -138,6 +157,7 @@ class ScriptPackageTest {
         assertFalse(File(dest, "stale").exists())
     }
 
+    // 各类清单/结构错误必须映射到稳定的 Reason，供调用方给出可读提示。
     @Test
     fun rejectsInvalidScripts() {
         assertReason(ScriptPackageException.Reason.ID_MISMATCH) { ScriptPackage.validate(validZip(), "other") }
@@ -147,12 +167,14 @@ class ScriptPackageTest {
         assertReason(ScriptPackageException.Reason.NOT_ONESHOT) {
             ScriptPackage.validate(zip(file("module.prop", "id=my_script\n"), file("action.sh", "x")))
         }
+        // "yes" 不是合法布尔值，因此不算 oneshot。
         assertReason(ScriptPackageException.Reason.NOT_ONESHOT) {
             ScriptPackage.validate(zip(file("module.prop", "id=my_script\noneshot=yes\n"), file("action.sh", "x")))
         }
         assertReason(ScriptPackageException.Reason.INVALID_ID) {
             ScriptPackage.validate(zip(file("module.prop", "id=1bad\noneshot=1\n"), file("action.sh", "x")))
         }
+        // action.sh 必须在包根，子目录或同名目录都不算。
         assertReason(ScriptPackageException.Reason.MISSING_ACTION) {
             ScriptPackage.validate(zip(file("module.prop", prop), file("sub/action.sh", "x")))
         }
@@ -162,10 +184,12 @@ class ScriptPackageTest {
         assertReason(ScriptPackageException.Reason.INVALID_PARAMS) {
             ScriptPackage.validate(validZip(file("params.json", """{"schemaVersion":2,"params":[]}""")))
         }
+        // 完全不是 ZIP 的输入归为 CORRUPT，而不是格式类错误。
         val notZip = tmp.newFile().apply { writeText("not a zip") }
         assertReason(ScriptPackageException.Reason.CORRUPT) { ScriptPackage.validate(notZip) }
     }
 
+    // 路径穿越、绝对路径、符号链接、FIFO 与重复条目都必须在解压前被拒绝，且不留下目标目录。
     @Test
     fun rejectsUnsafeEntries() {
         val dest = File(tmp.root, "out")
@@ -179,6 +203,7 @@ class ScriptPackageTest {
         )) {
             assertReason(ScriptPackageException.Reason.UNSAFE_ENTRY) { ScriptPackage.validate(z) }
             assertReason(ScriptPackageException.Reason.UNSAFE_ENTRY) { ScriptPackage.extract(z, dest) }
+            // 失败时目标目录与父目录中的穿越目标都不能被创建。
             assertFalse(dest.exists())
             assertFalse(File(tmp.root, "evil").exists())
         }
@@ -186,6 +211,7 @@ class ScriptPackageTest {
         assertTrue(tmp.root.list()!!.none { it.startsWith(".tmp-") })
     }
 
+    // 解压总大小与 params.json 大小都有上限，防压缩炸弹；目录条目也计入条目数上限。
     @Test
     fun enforcesSizeLimit() {
         // Highly compressible: tiny on disk, larger than the limit once extracted.
@@ -205,10 +231,12 @@ class ScriptPackageTest {
         assertReason(ScriptPackageException.Reason.TOO_LARGE) { ScriptPackage.validate(validZip(*roots)) }
     }
 
+    // 仅读取流头部即可判断是否 oneshot，用于在完整下载前预览；超限/垃圾输入返回 null。
     @Test
     fun peeksOneshotFromStream() {
         val m = FileInputStream(validZip()).use { ScriptPackage.readOneshotManifest(it) }
         assertEquals("my_script", m?.id)
+        // 非 oneshot 的普通模块返回 null。
         val module = zip(file("module.prop", "id=m\nname=M\n"), file("customize.sh", ""))
         assertNull(FileInputStream(module).use { ScriptPackage.readOneshotManifest(it) })
         assertNull("garbage".byteInputStream().use { ScriptPackage.readOneshotManifest(it) })
@@ -221,11 +249,13 @@ class ScriptPackageTest {
         assertNull(FileInputStream(bomb).use { ScriptPackage.readOneshotManifest(it) })
         // The compressed input is capped as well.
         val endless = object : java.io.InputStream() {
+            // 永远返回 0 表示“未到 EOF”，用于验证读取有上限、不会无限循环。
             override fun read(): Int = 0
         }
         assertNull(ScriptPackage.readOneshotManifest(endless))
     }
 
+    // bounded 只允许读到 limit 字节；多读一个字节就应报告 TOO_LARGE。
     @Test
     fun boundedStreamFailsPastTheLimit() {
         assertEquals(4, ScriptPackage.bounded(ByteArray(4).inputStream(), 4).readBytes().size)

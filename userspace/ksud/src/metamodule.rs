@@ -250,7 +250,7 @@ pub fn exec_metauninstall_script(module_id: &str) -> Result<()> {
     let result = Command::new(assets::BUSYBOX_PATH)
         .args(["sh", metauninstall_path.to_str().unwrap()])
         .current_dir(metauninstall_path.parent().unwrap())
-        .envs(crate::module::get_common_script_envs(
+        .envs(crate::module::common_script_env(
             get_metamodule_id().as_deref(),
         ))
         // MODULE_ID 指向被卸载的模块，而不是元模块自身。
@@ -279,7 +279,7 @@ pub fn exec_mount_script(module_dir: &str) -> Result<()> {
 
     let result = Command::new(assets::BUSYBOX_PATH)
         .args(["sh", mount_script.to_str().unwrap()])
-        .envs(crate::module::get_common_script_envs(
+        .envs(crate::module::common_script_env(
             get_metamodule_id().as_deref(),
         ))
         .env("MODULE_DIR", module_dir)

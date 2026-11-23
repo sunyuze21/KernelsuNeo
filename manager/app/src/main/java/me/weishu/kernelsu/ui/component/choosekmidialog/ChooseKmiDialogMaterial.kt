@@ -20,6 +20,11 @@ import me.weishu.kernelsu.ui.component.material.SegmentedRadioItem
 import me.weishu.kernelsu.ui.util.getCurrentKmi
 import me.weishu.kernelsu.ui.util.getSupportedKmis
 
+/**
+ * Material 版 KMI 选择对话框。设备支持列表与当前 KMI 均为异步读取，
+ * 因此先以空列表/空串占位，读取完成后自动重组。show 为 false 时不进入组合，
+ * 避免反复读取设备信息。
+ */
 @Composable
 fun ChooseKmiDialogMaterial(
     show: Boolean,
@@ -28,19 +33,23 @@ fun ChooseKmiDialogMaterial(
 ) {
     if (!show) return
 
+    // 支持的 KMI 列表来自设备/内核，需异步获取，初始为空避免阻塞首帧
     val supportedKMIs by produceState(initialValue = emptyList()) {
         value = getSupportedKmis()
     }
 
+    // 当前设备 KMI，用于标注“当前”以及作为默认选中项
     val currentKmi by produceState(initialValue = "") {
         value = getCurrentKmi()
     }
 
+    // 用户的选择独立于 currentKmi，取消时再回滚，避免污染已生效配置
     val selectedKmi = remember(currentKmi) { mutableStateOf(currentKmi) }
 
     AlertDialog(
         onDismissRequest = {
             onDismissRequest()
+            // 关闭即丢弃未确认的选择
             selectedKmi.value = currentKmi
         },
         confirmButton = {
@@ -49,6 +58,7 @@ fun ChooseKmiDialogMaterial(
                     onSelected(selectedKmi.value)
                     onDismissRequest()
                 },
+                // 只有受支持的 KMI 才允许确认，防止写入非法值
                 enabled = supportedKMIs.contains(selectedKmi.value)
             ) {
                 Text(stringResource(id = R.string.confirm))
@@ -77,6 +87,7 @@ fun ChooseKmiDialogMaterial(
                     {
                         SegmentedRadioItem(
                             title = kmi,
+                            // 仅给当前设备 KMI 加说明，帮助用户区分
                             summary = if (kmi == currentKmi) stringResource(R.string.current_device_kmi) else null,
                             selected = selectedKmi.value == kmi,
                             onClick = { selectedKmi.value = kmi }

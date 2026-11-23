@@ -118,6 +118,8 @@
     <string name="require_kernel_version_gki">需要更新内核</string>
     <string name="settings_umount_modules_default">默认卸载模块</string>
     <string name="settings_umount_modules_default_summary">App Profile 中「卸载模块」的全局默认值，如果启用，会将未自定义 Profile 的应用移除所有模块针对系统的修改</string>
+    <string name="settings_module_integrity_check">模块签名验证(实验性)</string>
+    <string name="settings_module_integrity_check_summary">安装模块时使用内置公钥校验模块签名，未签名或签名无效的模块将被拒绝安装。请谨慎开启。</string>
     <string name="profile_umount_modules_summary">启用该选项后将允许 KernelSU 为本应用还原被模块修改过的文件</string>
     <string name="profile_selinux_domain">域</string>
     <string name="profile_selinux_rules">规则</string>

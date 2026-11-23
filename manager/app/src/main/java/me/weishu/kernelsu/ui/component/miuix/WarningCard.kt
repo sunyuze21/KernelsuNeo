@@ -19,6 +19,18 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.isDynamicColor
 import top.yukonga.miuix.kmp.utils.PressFeedbackType
 
+/**
+ * 警告/提示信息卡片。
+ *
+ * 颜色由 [WarningLevel] 与主题模式共同决定：动态取色时走主题容器色，
+ * 否则用内置的低饱和警示色，避免在非动态取色设备上退化成纯红/纯黄而显得刺眼。
+ * 只有传入 `onClick` 时才开启按压反馈，纯展示卡片不应产生“可点击”的暗示。
+ *
+ * @param message 警告正文
+ * @param level 严重程度，决定配色
+ * @param onClick 点击回调；为 null 时卡片不可交互
+ * @param action 右侧附加操作区（例如“详情”按钮）
+ */
 @Composable
 fun WarningCard(
     message: String,
@@ -53,6 +65,12 @@ fun WarningCard(
     }
 }
 
+/**
+ * 计算警告卡片背景色。
+ *
+ * 优先使用动态取色的容器色；未启用动态取色时按明暗主题给出手调的低饱和底色，
+ * 这样文字仍能保持较高对比度，同时不抢走页面主色。
+ */
 @Composable
 private fun WarningLevel.containerColor(): Color = when {
     isDynamicColor -> when (this) {
@@ -71,6 +89,12 @@ private fun WarningLevel.containerColor(): Color = when {
     }
 }
 
+/**
+ * 计算警告卡片前景色。
+ *
+ * 动态取色时用对应的 on* 容器色保证可读性；否则使用高饱和的红/橙，
+ * 在浅色底上足够醒目。注意这里不区分深浅主题，因为手调的背景已足够深/浅。
+ */
 @Composable
 private fun WarningLevel.contentColor(): Color = when {
     isDynamicColor -> when (this) {

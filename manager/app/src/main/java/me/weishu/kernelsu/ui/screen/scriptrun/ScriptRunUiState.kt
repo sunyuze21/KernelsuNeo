@@ -20,6 +20,7 @@ data class ScriptRunArg(
     val displayName: String? = null,
 ) : Parcelable
 
+/** 脚本运行页的生命周期阶段；仅 READY 且无参数错误时才允许执行。 */
 enum class ScriptRunPhase {
     PREPARING,
     FAILED,
@@ -28,6 +29,13 @@ enum class ScriptRunPhase {
     FINISHED,
 }
 
+/**
+ * 脚本运行页的完整状态快照。
+ *
+ * [values] 保存每个参数键的原始输入字符串，[errors] 只记录校验失败项：
+ * 校验在 ViewModel 中随输入实时重算，UI 仅负责展示，避免两端规则不一致。
+ * 运行期间 [output] 持续累积，[exitCode] 在结束后才有值。
+ */
 @Immutable
 data class ScriptRunUiState(
     val phase: ScriptRunPhase = ScriptRunPhase.PREPARING,
@@ -43,12 +51,15 @@ data class ScriptRunUiState(
     val output: String = "",
     val exitCode: Int? = null,
 ) {
+    // 必须同时满足“已就绪”和“无参数错误”，防止绕过输入校验直接执行。
     val canRun: Boolean get() = phase == ScriptRunPhase.READY && errors.isEmpty()
 }
 
+/** 脚本运行页的用户操作回调。 */
 @Immutable
 data class ScriptRunActions(
     val onBack: () -> Unit,
+    // 参数键 -> 新值；校验由 ViewModel 负责，此处不做格式假设
     val onValueChange: (key: String, value: String) -> Unit,
     val onRun: () -> Unit,
     val onInstallAsModule: () -> Unit,

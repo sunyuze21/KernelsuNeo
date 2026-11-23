@@ -37,6 +37,12 @@ import me.weishu.kernelsu.ui.util.module.Shortcut
 import me.weishu.kernelsu.ui.viewmodel.ModuleViewModel
 import me.weishu.kernelsu.ui.webui.WebUIActivity
 
+/**
+ * 模块页入口：组装 ViewModel、生命周期刷新与全部回调，再按主题分发给 Material/Miuix 实现。
+ *
+ * 该 Composable 只做状态编排，不持有列表 UI；两套皮肤共享同一份 actions，
+ * 避免逻辑分叉。isCurrentPage 用于区分当前可见页，避免在后台页触发刷新。
+ */
 @Composable
 fun ModulePager(
     bottomInnerPadding: Dp,
@@ -51,6 +57,7 @@ fun ModulePager(
     val scope = rememberCoroutineScope()
     val rawUiState by viewModel.uiState.collectAsStateWithLifecycle()
 
+    // WebUI 返回后模块自身状态可能被改写，因此回到页面时无条件重新读取列表
     val webUILauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { viewModel.fetchModuleList(resort = false) }
@@ -59,9 +66,11 @@ fun ModulePager(
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { /* Download works regardless of result */ }
+    // 用 rememberUpdatedState 保证回调里读到的是最新页码状态，而不是首次组合时的值
     val latestIsCurrentPage by rememberUpdatedState(isCurrentPage)
     val initialResumeHandled = rememberSaveable { mutableStateOf(false) }
 
+    // hasActivated 防止页面切回前台时重复初始化偏好与申请权限，只需一次
     var hasActivated by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(isCurrentPage) {
         if (isCurrentPage) {
@@ -78,10 +87,12 @@ fun ModulePager(
                 }
             }
         } else if (!rawUiState.searchStatus.isCollapsed()) {
+            // 离开页面时收起搜索，避免下次进入仍停留在过滤结果上
             viewModel.updateSearchStatus(rawUiState.searchStatus.copy(searchText = "", current = SearchStatus.Status.COLLAPSED))
         }
     }
 
+    // 首次恢复只记录标记；之后的恢复才刷新，避免首帧重复请求
     LifecycleResumeEffect(Unit) {
         if (initialResumeHandled.value && latestIsCurrentPage) {
             val state = viewModel.uiState.value
@@ -132,6 +143,7 @@ fun ModulePager(
                         )
                     },
                     onDownloaded = { uri ->
+                        // 页面已不在前台时不跳转刷写，否则会在错误页面弹出安装流程
                         if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
                             navigator.push(Route.Flash(FlashIt.FlashModules(listOf(uri))))
                             viewModel.markNeedRefresh()
@@ -156,6 +168,7 @@ fun ModulePager(
             viewModel.toggleSortEnabledFirst()
         },
         onOpenWebUi = { module ->
+            // WebUI 通过模块 id 构造私有 uri，由 WebUIActivity 解析出模块目录
             webUILauncher.launch(
                 Intent(context, WebUIActivity::class.java)
                     .setData(
@@ -197,6 +210,7 @@ fun ModulePager(
         },
     )
 
+    // 两套 UI 共用同一 uiState 与 actions，仅渲染层不同
     when (uiMode) {
         UiMode.Miuix -> ModulePagerMiuix(
             uiState = rawUiState,

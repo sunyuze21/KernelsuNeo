@@ -74,6 +74,9 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 /**
+ * Miuix 主题下的安装页实现，结构与 Material 版一致，仅控件风格不同。
+ * 不持有业务状态，全部通过 [InstallUiState] / [InstallScreenActions] 交互。
+ *
  * @author weishu
  * @date 2024/3/12.
  */
@@ -85,6 +88,7 @@ internal fun InstallScreenMiuix(
 ) {
     val enableBlur = LocalEnableBlur.current
     val scrollBehavior = MiuixScrollBehavior()
+    // 模糊背景只在开关开启且系统支持时存在；启用后顶栏需用透明色才能透出模糊层
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
@@ -107,6 +111,7 @@ internal fun InstallScreenMiuix(
         },
         contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal)
     ) { innerPadding ->
+        // 列表内容作为模糊层的背景采样源，滚动时顶栏模糊随内容变化
         Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
             LazyColumn(
                 modifier = Modifier
@@ -130,6 +135,7 @@ internal fun InstallScreenMiuix(
                             onSelectBootImage = actions.onSelectBootImage,
                         )
                     }
+                    // 只有支持分区选择的方式才展开该卡片，切换方式时做收缩动画
                     AnimatedVisibility(
                         visible = uiState.canSelectPartition,
                         enter = expandVertically(),
@@ -171,6 +177,7 @@ internal fun InstallScreenMiuix(
                             )
                         }
                     }
+                    // 强制备份仅对本地镜像文件开放
                     AnimatedVisibility(
                         visible = uiState.canForceBackup,
                         enter = expandVertically(),
@@ -235,6 +242,7 @@ internal fun InstallScreenMiuix(
                             }
                         )
                     }
+                    // 高级选项默认折叠，避免 allowShell/enableAdb 被误开启
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -294,6 +302,10 @@ internal fun InstallScreenMiuix(
     }
 }
 
+/**
+ * 安装方式选择列表；行级 toggleable 与内部 CheckboxPreference 都触发同一
+ * 回调，因此需要对已选中项做幂等处理。
+ */
 @Composable
 private fun SelectInstallMethod(
     state: InstallUiState,
@@ -320,6 +332,7 @@ private fun SelectInstallMethod(
 
     Column {
         state.installMethodOptions.forEach { option ->
+            // 每个选项独立交互源，避免 ripple/pressed 状态互相影响
             val interactionSource = remember { MutableInteractionSource() }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -344,6 +357,7 @@ private fun SelectInstallMethod(
     }
 }
 
+/** 安装页顶栏；[backdrop] 为空时不套模糊层，[barColor] 由调用方按模糊状态决定。 */
 @Composable
 private fun TopBar(
     onBack: () -> Unit = {},

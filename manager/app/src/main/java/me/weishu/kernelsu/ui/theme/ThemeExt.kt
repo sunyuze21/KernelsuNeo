@@ -12,6 +12,11 @@ import com.materialkolor.PaletteStyle
 import com.materialkolor.dynamiccolor.ColorSpec
 import com.materialkolor.rememberDynamicColorScheme
 
+/**
+ * 将配色方案中的表面色系替换为纯黑，用于 AMOLED 省电模式。
+ *
+ * 仅覆盖背景/表面槽位，主色与前景色保持不变，以保证对比度仍符合原方案。
+ */
 fun ColorScheme.amoledBackground(amoled: Boolean): ColorScheme =
     if (!amoled) this
     else copy(
@@ -25,6 +30,12 @@ fun ColorScheme.amoledBackground(amoled: Boolean): ColorScheme =
         surfaceContainerHighest = Color.Black,
     )
 
+/**
+ * 基于种子色生成 Material3 配色方案，并在内部处理动态取色与 AMOLED 适配。
+ *
+ * [seedColor] 传 Color.Unspecified 时改为读取系统动态主色（Monet）；
+ * 结果通过 rememberDynamicColorScheme 缓存，相同输入不会重复计算调色板。
+ */
 @Composable
 fun rememberKernelSUColorScheme(
     seedColor: Color,
@@ -34,6 +45,7 @@ fun rememberKernelSUColorScheme(
     colorSpec: ColorSpec.SpecVersion,
 ): ColorScheme {
     val context = LocalContext.current
+    // 未指定强调色时用系统动态主色作种子，保证与其他应用配色一致
     val seed = if (seedColor == Color.Unspecified) {
         (if (isDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)).primary
     } else {
@@ -44,12 +56,20 @@ fun rememberKernelSUColorScheme(
         isDark = isDark,
         isAmoled = isAmoled,
         style = paletteStyle,
+        // 规范需与风格匹配，否则 materialkolor 会产出错误色调
         specVersion = colorSpec.effectiveFor(paletteStyle),
     ).amoledBackground(isAmoled)
 }
 
+/**
+ * 为配色方案中的每个颜色槽位套上弹簧动画，使主题切换平滑过渡。
+ *
+ * 该函数会为约 50 个槽位各创建一个动画，调用方应只在主题根节点使用一次，
+ * 避免在频繁重组的子树中重复创建动画状态。
+ */
 @Composable
 fun ColorScheme.animateAsState(): ColorScheme {
+    // 局部辅助函数，统一所有槽位的动画参数，避免逐个配置造成不一致
     @Composable
     fun animateColor(color: Color): Color = animateColorAsState(
         targetValue = color,

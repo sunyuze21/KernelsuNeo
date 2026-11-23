@@ -22,22 +22,33 @@ use std::time::Duration;
 use crate::{defs, ksucalls, module_config, utils};
 
 // 与 kernel/infra/event_queue.h 共享的协议常量。
+/// 队列记录类型：内核内部使用的丢事件通知（0xFFFF）。
 const KSU_EVENT_QUEUE_TYPE_DROPPED: u16 = u16::MAX;
+/// 记录标志位：表示该记录由内核内部产生，而不是用户事件。
 const KSU_EVENT_RECORD_FLAG_INTERNAL: u16 = 1;
 // 与 uapi/sulog.h 中的 TASK_COMM_LEN 保持一致。
+/// 内核 `TASK_COMM_LEN`：comm 字段的固定字节数（含 NUL）。
 const TASK_COMM_LEN: usize = 16;
 // 大于内核单条最大记录（24 字节头 + 2 KiB 负载），保证一次 read 拿到的是
 // 完整记录。
+/// 单次 read 的缓冲区大小，必须覆盖内核允许的最大单条记录。
 const READ_BUF_SIZE: usize = 8192;
+/// 会话异常结束后重新打开队列的延时，避免内核未就绪时忙等。
 const SULOGD_RESTART_DELAY: Duration = Duration::from_secs(3);
 // 日志包含命令行，因此目录和文件都必须保持私有。
+/// 日志目录权限：0700，阻止其他应用遍历或读取日志。
 const SULOG_DIR_MODE: u32 = 0o700;
+/// 日志文件权限：0600，仅允许 root 读写。
 const SULOG_FILE_MODE: u32 = 0o600;
 /// 保存 sulogd 设置的模块配置命名空间。
 pub const SULOG_CONFIG_MODULE_ID: &str = "internal.ksud.sulogd";
+/// 保留天数的配置键；值必须是大于 0 的整数。
 const SULOG_RETENTION_CONFIG_KEY: &str = "log.retention.days";
+/// 单文件滚动上限的配置键；值必须是大于 0 的原始字节数。
 const SULOG_MAX_FILE_SIZE_CONFIG_KEY: &str = "log.max_file_size";
+/// 默认保留 3 天（今天加前两天）。
 const DEFAULT_SULOG_RETENTION_DAYS: u64 = 3;
+/// 默认单文件上限 10 MiB，避免长期运行时日志无限增长。
 const DEFAULT_SULOG_MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 /// 事件队列中每条记录前面的头部。
@@ -47,10 +58,15 @@ const DEFAULT_SULOG_MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 struct EventRecordHeader {
+    /// 记录类型；`0xFFFF` 表示内核发出的丢事件通知。
     record_type: u16,
+    /// 记录标志位，见 `KSU_EVENT_RECORD_FLAG_*`。
     flags: u16,
+    /// 头部之后的负载字节数，不含头部本身。
     payload_len: u32,
+    /// 全局递增序号，用于发现并解释日志中的序号缺口。
     seq: u64,
+    /// 内核记录的事件时间戳（纳秒）。
     ts_ns: u64,
 }
 
@@ -61,8 +77,11 @@ struct EventRecordHeader {
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 struct DroppedInfo {
+    /// 本次通知对应的丢弃事件总数。
     dropped: u64,
+    /// 被丢弃区间的第一个序号（含）。
     first_seq: u64,
+    /// 被丢弃区间的最后一个序号（含）。
     last_seq: u64,
 }
 
@@ -73,32 +92,54 @@ struct DroppedInfo {
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 struct SulogEventHeader {
+    /// 事件结构版本，供未来兼容扩展。
     version: u16,
+    /// 事件类型，对应内核 `enum ksu_sulog_event_type`。
     event_type: u16,
+    /// 被记录系统调用的返回值；失败时通常为负 errno。
     retval: i32,
+    /// 线程 id。
     pid: u32,
+    /// 线程组 id（进程 id）。
     tgid: u32,
+    /// 父进程 id。
     ppid: u32,
+    /// 真实 uid。
     uid: u32,
+    /// 有效 uid；与 uid 不同时说明发生了身份切换。
     euid: u32,
+    /// 进程名，定长字段，可能没有 NUL 终止符。
     comm: [u8; TASK_COMM_LEN],
+    /// 后续 filename 字段的字节数，包含其 NUL 终止符。
     filename_len: u32,
+    /// 后续 argv 字段的字节数，包含其 NUL 终止符。
     argv_len: u32,
 }
 
 /// 解析完成的事件，变长字符串已解码。
 #[derive(Clone, Debug)]
 struct SulogEvent {
+    /// 事件结构版本。
     version: u16,
+    /// 事件类型，决定 `event_name` 的可读名称。
     event_type: u16,
+    /// 系统调用返回值。
     retval: i32,
+    /// 线程 id。
     pid: u32,
+    /// 线程组 id。
     tgid: u32,
+    /// 父进程 id。
     ppid: u32,
+    /// 真实 uid。
     uid: u32,
+    /// 有效 uid。
     euid: u32,
+    /// 已解码的进程名。
     comm: String,
+    /// 已解码的可执行文件路径。
     file: String,
+    /// 已解码的命令行，写入日志前会转义。
     argv: String,
 }
 
@@ -112,21 +153,29 @@ enum ReadState {
 
 /// 会话结束的原因，用于在重启前选择日志文案。
 enum SessionExitReason {
+    /// 内核关闭了事件队列（read 返回 0）。
     FdClosed,
+    /// epoll 报告挂断或错误，需要重建会话。
     EpollHangup,
 }
 
 /// 单实例 sulogd 的独占所有权标记。
 struct SulogdLockGuard {
+    /// 持有 flock 的文件描述；Drop 时关闭文件即释放锁。
     _lock_file: File,
 }
 
 /// 按天切分、按大小滚动的追加写入器。
 struct DailyLogWriter {
+    /// 当前文件对应的本地日期（`YYYY-MM-DD`）。
     current_day: String,
+    /// 当天的滚动序号；0 表示无后缀的普通文件。
     current_index: u32,
+    /// 当前文件已写入的字节数，用于判断何时滚动。
     current_size: u64,
+    /// 当前生效的单文件上限，跨天时重新读取配置。
     max_file_size: u64,
+    /// 按行刷新的追加写入器，保证每条事件落盘后立即可读。
     writer: LineWriter<File>,
 }
 
@@ -367,7 +416,9 @@ fn parse_max_file_size(value: &str) -> Result<u64> {
 /// 当前生效的保留天数与滚动上限。
 #[derive(Clone, Copy, Debug)]
 struct SulogConfig {
+    /// 保留天数（含今天），必须大于 0。
     retention_days: u64,
+    /// 单文件字节上限，必须大于 0。
     max_file_size: u64,
 }
 

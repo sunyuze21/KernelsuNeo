@@ -4,6 +4,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use zipsign_api::verify::{collect_keys, verify_zip};
 
+/// 模块签名校验使用的内置公钥（编译时嵌入）；只有用对应私钥签名的 ZIP 才能通过校验。
 const PUBLIC_KEY: [u8; 32] = *include_bytes!("../pub.key");
 /// 标记文件存在时才启用模块签名校验。
 pub const INTEGRITY_CHECK_PATH: &str = "/data/adb/ksu/.enable_integrity_check";
@@ -16,7 +17,14 @@ pub const INTEGRITY_CHECK_PATH: &str = "/data/adb/ksu/.enable_integrity_check";
 pub fn module_integrity_check(zip: &str) -> Result<(), Box<dyn std::error::Error>> {
     let keys = collect_keys(std::iter::once(Ok(PUBLIC_KEY)))?;
     let mut file = File::open(zip)?;
-    verify_zip(&mut file, &keys, None)?;
+
+    // 从路径中提取文件名，转成字节作为 context
+    let filename = Path::new(zip)
+        .file_name()
+        .ok_or("无法获取文件名")?
+        .to_string_lossy();
+
+    verify_zip(&mut file, &keys, Some(filename.as_bytes()))?;
     Ok(())
 }
 

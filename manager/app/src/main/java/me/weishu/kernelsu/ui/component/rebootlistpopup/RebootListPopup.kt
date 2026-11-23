@@ -14,11 +14,16 @@ import me.weishu.kernelsu.ui.UiMode
 import me.weishu.kernelsu.ui.component.dialog.rememberConfirmDialog
 import me.weishu.kernelsu.ui.util.reboot
 
+// 重启菜单项：labelRes 用于展示，reason 传给内核以区分重启类型（空串表示普通重启）
 data class RebootListOption(
     @param:StringRes val labelRes: Int,
     val reason: String,
 )
 
+/**
+ * 构建重启选项列表。是否包含 userspace 重启取决于设备 PowerManager 能力，
+ * 其余选项按固定顺序展示，reason 必须与内核识别的字符串一致。
+ */
 @Composable
 fun getRebootListOption(): List<RebootListOption> {
     val pm = LocalContext.current.getSystemService(Context.POWER_SERVICE) as PowerManager?
@@ -28,6 +33,7 @@ fun getRebootListOption(): List<RebootListOption> {
 
     return buildList {
         add(RebootListOption(R.string.reboot, ""))
+        // 仅设备支持时提供 userspace 重启入口
         if (isRebootingUserspaceSupported) {
             add(RebootListOption(R.string.reboot_userspace, "userspace"))
         }
@@ -46,8 +52,10 @@ fun rememberRebootAction(): (String) -> Unit {
     val message = stringResource(R.string.jailbreak_reboot_warning)
     val confirmDialog = rememberConfirmDialog(onConfirm = { reboot() })
 
+    // 返回稳定的重启动作；依赖标题/文案/对话框句柄，避免捕获过期资源
     return remember(title, message, confirmDialog) {
         { reason ->
+            // 免 root/jailbreak 模式下普通重启会丢失 root，先弹确认
             if (Natives.isLateLoadMode && reason.isEmpty()) {
                 confirmDialog.showConfirm(title = title, content = message)
             } else {
@@ -57,6 +65,9 @@ fun rememberRebootAction(): (String) -> Unit {
     }
 }
 
+/**
+ * 重启列表弹窗入口，按 UI 模式分派实现。
+ */
 @Composable
 fun RebootListPopup() {
     when (LocalUiMode.current) {

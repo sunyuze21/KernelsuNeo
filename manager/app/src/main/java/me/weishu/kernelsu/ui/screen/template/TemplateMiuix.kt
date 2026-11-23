@@ -100,6 +100,9 @@ import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 /**
  * @author weishu
  * @date 2023/10/20.
+ *
+ * 模板列表的 Miuix 实现：用法与 Material 版一致，但下拉刷新和悬浮按钮
+ * 由 Miuix 组件实现。滚动时通过自定义 NestedScrollConnection 控制 FAB 显隐。
  */
 @SuppressLint("LocalContextGetResourceValueCall")
 @Composable
@@ -112,10 +115,13 @@ fun AppProfileTemplateScreenMiuix(
 
     val listState = rememberLazyListState()
     var fabVisible by remember { mutableStateOf(true) }
+    // 累积滚动距离，超过阈值才切换 FAB 显隐，避免快速滑动时闪烁。
     var scrollDistance by remember { mutableFloatStateOf(0f) }
     val nestedScrollConnection = remember {
         object : NestedScrollConnection {
+            // 只观察向上滚动，不消费事件，返回 Offset.Zero 交回给列表处理。
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                // 已滚到底部时不隐藏 FAB，否则用户无法点击“新建”。
                 val isScrolledToEnd =
                     (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index == listState.layoutInfo.totalItemsCount - 1
                             && (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.size
@@ -140,6 +146,7 @@ fun AppProfileTemplateScreenMiuix(
         animationSpec = tween(durationMillis = 350)
     )
     val enableBlur = LocalEnableBlur.current
+    // 模糊不可用时使用不透明 surface；backdrop 与 barColor 必须成对使用。
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
@@ -219,6 +226,7 @@ fun AppProfileTemplateScreenMiuix(
             }
         }
         val pullToRefreshState = rememberPullToRefreshState()
+        // 下拉刷新的四个阶段文案，需按顺序对应组件的状态机。
         val refreshTexts = listOf(
             stringResource(R.string.refresh_pulling),
             stringResource(R.string.refresh_release),
@@ -272,6 +280,7 @@ fun AppProfileTemplateScreenMiuix(
     }
 }
 
+/** 单个模板卡片：名称、来源标记、作者、描述与 UID/GID/上下文信息。 */
 @Composable
 private fun TemplateItem(
     template: TemplateInfo,
@@ -357,6 +366,7 @@ private fun TemplateItem(
     }
 }
 
+/** 信息标签：图标加短文本，用于 UID/GID/上下文等只读元数据。 */
 @Composable
 private fun InfoChip(icon: ImageVector, text: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -376,6 +386,7 @@ private fun InfoChip(icon: ImageVector, text: String) {
     }
 }
 
+/** Miuix 顶栏：返回、标题与导入/导出弹窗，模糊背景由 [backdrop]/[barColor] 控制。 */
 @Composable
 private fun TopBar(
     onBack: () -> Unit,
@@ -405,6 +416,7 @@ private fun TopBar(
                 }
             },
             actions = {
+                // 弹窗状态只属于顶栏，且需在重组间保持，因此用 remember 包裹。
                 val showTopPopup = remember { mutableStateOf(false) }
                 OverlayListPopup(
                     show = showTopPopup.value,

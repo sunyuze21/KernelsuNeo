@@ -98,6 +98,8 @@
     <string name="require_kernel_version_gki">需要更新核心</string>
     <string name="settings_umount_modules_default">預設卸載模組</string>
     <string name="settings_umount_modules_default_summary">控制 App Profile「卸載模組」的預設值，對未設定的 App 移除模組修改</string>
+    <string name="settings_module_integrity_check">模組簽章驗證(實驗性)</string>
+    <string name="settings_module_integrity_check_summary">安裝模組時使用內建公鑰驗證模組簽章，未簽章或簽章無效的模組將被拒絕安裝。請謹慎開啟。</string>
     <string name="profile_umount_modules_summary">啟用後 KernelSU 將為此 App 還原所有被模組修改過的檔案</string>
     <string name="profile_selinux_domain">Domain</string>
     <string name="profile_selinux_rules">Rules</string>

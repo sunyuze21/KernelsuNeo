@@ -12,6 +12,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import top.yukonga.miuix.kmp.basic.Text
 
+/**
+ * Miuix 版状态标签：比 Material 版更小的字号与更重的字重，
+ * 单行不换行，避免在紧凑布局中被折行撑高。
+ */
 @Composable
 fun StatusTagMiuix(
     label: String,
@@ -32,6 +36,7 @@ fun StatusTagMiuix(
             color = contentColor,
             fontSize = 9.sp,
             fontWeight = FontWeight(750),
+            // 标签应保持单行，超出部分由调用方决定是否截断
             maxLines = 1,
             softWrap = false
         )

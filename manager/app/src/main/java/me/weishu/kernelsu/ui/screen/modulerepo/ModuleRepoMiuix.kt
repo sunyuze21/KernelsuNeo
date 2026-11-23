@@ -134,6 +134,7 @@ import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 import java.text.NumberFormat
 
+/** 仓库列表页（Miuix）：搜索浮层、排序弹窗、下拉刷新与加载/空态。 */
 @SuppressLint("LocalContextGetResourceValueCall")
 @Composable
 fun ModuleRepoScreenMiuix(
@@ -143,11 +144,13 @@ fun ModuleRepoScreenMiuix(
     val searchStatus = state.searchStatus
     val density = LocalDensity.current
 
+    // 搜索框状态由 SearchStatus 持有，这里把文本回传给 ViewModel 以触发过滤
     LaunchedEffect(searchStatus.searchText) {
         actions.onSearchTextChange(searchStatus.searchText)
     }
 
     val scrollBehavior = MiuixScrollBehavior()
+    // 顶栏折叠时收缩搜索栏上边距
     val dynamicTopPadding by remember {
         derivedStateOf { 12.dp * (1f - scrollBehavior.state.collapsedFraction) }
     }
@@ -155,6 +158,7 @@ fun ModuleRepoScreenMiuix(
     val enableBlur = LocalEnableBlur.current
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
+    // 模糊开启时顶栏需透明以透出背景
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
     Scaffold(
@@ -248,6 +252,7 @@ fun ModuleRepoScreenMiuix(
             }
         },
         popupHost = {
+            // 搜索浮层单独维护列表，点击结果直接进入详情
             searchStatus.SearchPager(
                 onSearchStatusChange = actions.onSearchStatusChange,
                 defaultResult = {},
@@ -328,6 +333,7 @@ fun ModuleRepoScreenMiuix(
     ) { innerPadding ->
         val layoutDirection = LocalLayoutDirection.current
         val isLoading = state.modules.isEmpty()
+        // 进入时已有数据就跳过入场等待，优先展示缓存内容
         val hadDataOnEntry = remember { state.modules.isNotEmpty() }
         val contentReady = hadDataOnEntry || rememberContentReady()
         val emptyMessage = state.emptyStateMessage
@@ -338,6 +344,7 @@ fun ModuleRepoScreenMiuix(
             val refreshTick = remember { mutableIntStateOf(0) }
             val latestModules = rememberUpdatedState(state.modules)
             val latestRefreshing = rememberUpdatedState(state.isRefreshing)
+            // 排序或手动刷新后回到顶部；刷新中挂起避免滚动冲突
             ScrollToTopOnChange(
                 lazyListState,
                 state.sortOrder,
@@ -364,6 +371,7 @@ fun ModuleRepoScreenMiuix(
                     end = innerPadding.calculateEndPadding(layoutDirection)
                 ),
             ) {
+                // 加载中优先展示错误/空态；仅当既无错误也未在刷新时显示无限进度
                 if (!contentReady || isLoading) {
                     Box(
                         modifier = Modifier
@@ -516,9 +524,11 @@ fun ModuleRepoScreenMiuix(
     }
 }
 
+/** 列表中的摘要文本：可展开时点击展开，不可展开时点击进入详情。 */
 @Composable
 private fun RepoSummaryText(module: RepoModule, onModuleClick: () -> Unit) {
     val maxLinesLimit = LocalModuleDescriptionMaxLines.current
+    // 按模块 id 保存展开状态，列表刷新后保持当前位置
     var expanded by rememberSaveable(module.moduleId) { mutableStateOf(false) }
     var canExpand by rememberSaveable(module.moduleId) { mutableStateOf(true) }
     ExpandableDescriptionText(
@@ -564,6 +574,7 @@ private fun RepoStarsMiuix(stars: Int?, modifier: Modifier = Modifier) {
     }
 }
 
+/** 小号状态标签；统一圆角与内边距，颜色由调用方按语义传入。 */
 @Composable
 private fun MiuixTag(text: String, background: Color, tint: Color) {
     Text(
@@ -580,6 +591,7 @@ private fun MiuixTag(text: String, background: Color, tint: Color) {
     )
 }
 
+/** 元模块/脚本/安装状态标签组；与 Material 版语义一致，仅样式不同。 */
 @Composable
 private fun RepoBadgesMiuix(
     metamodule: Boolean,
@@ -678,6 +690,7 @@ private fun CachedDetailNoticeMiuix(modifier: Modifier = Modifier) {
     )
 }
 
+/** README 分页（Miuix）：markdown 加载完成前维持占位进度，避免内容高度跳动。 */
 @Composable
 private fun ReadmePage(
     state: ModuleRepoDetailUiState,
@@ -778,6 +791,7 @@ private fun ReadmePage(
     }
 }
 
+/** Releases 分页（Miuix）：每个发布一张卡片，依次展示变更说明、下载入口与来源链接。 */
 @Composable
 fun ReleasesPage(
     state: ModuleRepoDetailUiState,
@@ -812,6 +826,7 @@ fun ReleasesPage(
             ),
             overscrollEffect = null,
         ) {
+            // 详情未就绪时只渲染状态占位，避免后续内容区反复重组
             if (detail == null) {
                 item { detailStatusMiuix(state, onRetry) }
                 return@LazyColumn
@@ -873,6 +888,7 @@ fun ReleasesPage(
                                     color = colorScheme.outline.copy(alpha = 0.5f)
                                 )
                                 val descReady = rememberContentReady()
+                                // 以 changelog 为 key 重置加载标记，切换版本不会复用旧状态
                                 var descLoaded by remember(changelog) { mutableStateOf(false) }
                                 val descAlpha by animateFloatAsState(
                                     targetValue = if (descLoaded) 1f else 0f,
@@ -949,6 +965,7 @@ fun ReleasesPage(
     }
 }
 
+/** 发布 ZIP 行（Miuix）：按钮在“下载 → 安装/运行”之间切换，下载中显示进度。 */
 @Composable
 private fun ReleaseZipRowMiuix(
     release: RepoRelease,
@@ -963,9 +980,11 @@ private fun ReleaseZipRowMiuix(
     context: Context,
     setPendingDownload: ((() -> Unit)) -> Unit,
 ) {
+    // 下载句柄按 zipUrl+sha256 复用，离开详情页后仍保留已验证文件
     val handle = rememberReleaseDownload(release)
     val onClickDownload = {
         val startText = context.getString(R.string.module_start_downloading, release.zipName)
+        // 用户确认后才真正开始下载
         setPendingDownload { scope.startReleaseDownload(context, release, handle) }
         confirmDialog.showConfirm(title = confirmTitle, content = startText)
     }
@@ -1007,10 +1026,12 @@ private fun ReleaseZipRowMiuix(
             backgroundColor = secondaryContainer,
             minHeight = 35.dp,
             minWidth = 35.dp,
+            // 下载中禁用按钮，已下载则始终可点（进入安装/运行）
             enabled = downloadedUri != null || !handle.isDownloading,
             onClick = {
                 if (downloadedUri != null) {
                     scope.launch {
+                        // 文件可能已被系统清理，失效时清空缓存以便重新下载
                         if (isDownloadAvailable(downloadedUri)) {
                             onInstallModule(downloadedUri)
                         } else {
@@ -1057,6 +1078,7 @@ private fun ReleaseZipRowMiuix(
     }
 }
 
+/** 信息行（Miuix）：左侧标题与值，右侧可选外链按钮。 */
 @Composable
 private fun InfoRowMiuix(
     title: String,
@@ -1101,6 +1123,7 @@ private fun InfoRowMiuix(
     }
 }
 
+/** 信息卡片：标题 + 若干行内容，行间自动插入分隔线；无内容时不渲染。 */
 @Composable
 private fun InfoCardMiuix(title: String, rows: List<@Composable () -> Unit>) {
     if (rows.isEmpty()) return
@@ -1127,6 +1150,7 @@ private fun InfoCardMiuix(title: String, rows: List<@Composable () -> Unit>) {
     }
 }
 
+/** 信息分页（Miuix）：状态提示与作者、源码、版本、标签等元信息。 */
 @Composable
 fun InfoPage(
     state: ModuleRepoDetailUiState,
@@ -1139,6 +1163,7 @@ fun InfoPage(
 ) {
     val layoutDirection = LocalLayoutDirection.current
     val detail = state.detail
+    // 详情未加载时使用导航参数里的作者列表，避免信息页空白
     val authors = detail?.module?.authorList?.map { AuthorArg(it.name, it.link) } ?: state.module.authorsList
     Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
         LazyColumn(
@@ -1285,6 +1310,7 @@ fun InfoPage(
     }
 }
 
+/** 仓库详情页（Miuix）：顶部标题栏 + 可横向切换的三页内容。 */
 @SuppressLint("StringFormatInvalid", "DefaultLocale")
 @Composable
 fun ModuleRepoDetailScreenMiuix(
@@ -1297,7 +1323,9 @@ fun ModuleRepoDetailScreenMiuix(
     val secondaryContainer = colorScheme.secondaryContainer.copy(alpha = 0.8f)
     val module = state.module
     val scope = rememberCoroutineScope()
+    // 脚本显示“运行”，模块显示“安装”
     val confirmTitle = stringResource(if (state.isScript) R.string.script_run_title else R.string.module_install)
+    // 下载动作延迟到确认后执行，避免误触消耗流量
     var pendingDownload by remember { mutableStateOf<(() -> Unit)?>(null) }
     val confirmDialog = rememberConfirmDialog(onConfirm = { pendingDownload?.invoke() })
 
@@ -1305,6 +1333,7 @@ fun ModuleRepoDetailScreenMiuix(
 
     val backdrop = rememberBlurBackdrop(enableBlur)
     val blurActive = backdrop != null
+    // 模糊开启时顶栏透明，否则使用表面色
     val detailBarColor = if (blurActive) Color.Transparent else colorScheme.surface
 
     val tabs = listOf(
@@ -1312,6 +1341,7 @@ fun ModuleRepoDetailScreenMiuix(
     )
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { tabs.size })
     val tabRowHeight = 40.dp
+    // 折叠程度驱动 tab 行的上边距，保证展开/收起时过渡自然
     val dynamicTopPadding = remember(scrollBehavior) {
         { 12.dp * (1f - scrollBehavior.state.collapsedFraction) }
     }
@@ -1412,6 +1442,7 @@ fun ModuleRepoDetailScreenMiuix(
                     setPendingDownload = { pendingDownload = it },
                     uriHandler = remember(actions) {
                         object : UriHandler {
+                            // 把 README 中的链接交给页面统一打开，避免 WebView 内部跳转。
                             override fun openUri(uri: String) = actions.onOpenUrl(uri)
                         }
                     },
@@ -1420,6 +1451,7 @@ fun ModuleRepoDetailScreenMiuix(
                 2 -> {
                     val uriHandler = remember(actions) {
                         object : UriHandler {
+                            // Info 页链接同样走外部 URI 处理，保持与 README 一致。
                             override fun openUri(uri: String) = actions.onOpenUrl(uri)
                         }
                     }

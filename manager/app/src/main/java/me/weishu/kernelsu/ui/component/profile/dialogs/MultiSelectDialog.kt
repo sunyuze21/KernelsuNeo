@@ -32,6 +32,12 @@ import me.weishu.kernelsu.ui.component.material.SegmentedCheckboxItem
 import me.weishu.kernelsu.ui.component.material.SegmentedColumn
 import top.yukonga.miuix.kmp.nav.gesture.WindowNavigationEventBridge
 
+/**
+ * 通用多选底部弹窗，带关键字过滤与最大选择数限制。
+ *
+ * 选择变更即时回调 [onSelectionChange]（不在此保存副本），便于上层做实时预览；
+ * [maxSelection] 用 Int.MAX_VALUE 表示不限制。过滤结果用 remember 缓存，避免每次重组重新匹配。
+ */
 @Composable
 fun <T> MultiSelectDialog(
     title: String,
@@ -44,7 +50,9 @@ fun <T> MultiSelectDialog(
     onSelectionChange: (Set<T>) -> Unit,
     onDismiss: () -> Unit
 ) {
+    // 搜索关键字只影响展示，不写回外部状态
     var searchQuery by remember { mutableStateOf("") }
+    // 同时匹配标题与副标题，忽略大小写；空关键字时直接复用原列表
     val filteredItems = remember(items, searchQuery) {
         if (searchQuery.isBlank()) {
             items
@@ -58,6 +66,7 @@ fun <T> MultiSelectDialog(
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        // 只允许隐藏/展开，禁用半展开，避免中间态遮挡内容
         sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))
     ) {
         WindowNavigationEventBridge()
@@ -96,6 +105,7 @@ fun <T> MultiSelectDialog(
                 modifier = Modifier.fillMaxWidth(),
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 trailingIcon = {
+                    // 有关键字时才显示清除按钮
                     if (searchQuery.isNotEmpty()) {
                         IconButton(onClick = { searchQuery = "" }) {
                             Icon(Icons.Filled.Close, contentDescription = null)
@@ -108,6 +118,7 @@ fun <T> MultiSelectDialog(
             SegmentedColumn(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // weight(fill = false) 让列表按内容收缩，同时不超过可用高度
                     .weight(1f, fill = false)
                     .verticalScroll(rememberScrollState()),
                 content = filteredItems.map { item ->
@@ -115,12 +126,14 @@ fun <T> MultiSelectDialog(
                         SegmentedCheckboxItem(
                             title = itemTitle(item),
                             summary = itemSubtitle(item),
+                            // 用 surface 色让复选项融入底部弹窗背景
                             colors = ListItemDefaults.segmentedColors().copy(
                                 containerColor = MaterialTheme.colorScheme.surface,
                                 contentColor = Color.Unspecified
                             ),
                             checked = selectedItems.contains(item),
                             onCheckedChange = { isChecked ->
+                                // 每次变更都基于外部集合新建 Set，避免就地修改触发意外重组
                                 val newSelection = selectedItems.toMutableSet()
                                 if (isChecked && newSelection.size < maxSelection) {
                                     newSelection.add(item)

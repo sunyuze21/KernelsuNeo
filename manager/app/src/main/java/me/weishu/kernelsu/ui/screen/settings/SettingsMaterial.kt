@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DeveloperMode
 import androidx.compose.material.icons.filled.DisplaySettings
 import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.GppGood
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LayersClear
 import androidx.compose.material.icons.filled.Palette
@@ -65,14 +66,17 @@ import me.weishu.kernelsu.ui.component.uninstalldialog.UninstallDialog
  * @author weishu
  * @date 2023/1/1.
  */
+// 设置页的 Material 3 布局：按能力状态展示开关和下拉项，所有修改通过 actions 回调持久化。
 @Composable
 fun SettingPagerMaterial(
     uiState: SettingsUiState,
     actions: SettingsScreenActions,
     bottomInnerPadding: Dp,
 ) {
+    // 折叠式顶栏与列表滚动联动，滚动时标题自动收起。
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
     val snackBarHost = remember { SnackbarHostState() }
+    // 使用 rememberSaveable，旋转屏幕或进程重建后卸载对话框状态不会丢失。
     val showUninstallDialog = rememberSaveable { mutableStateOf(false) }
     var showBottomSheet by remember { mutableStateOf(false) }
 
@@ -94,6 +98,7 @@ fun SettingPagerMaterial(
                 .nestedScroll(scrollBehavior.nestedScrollConnection)
                 .verticalScroll(rememberScrollState())
         ) {
+            // 内核未激活时隐藏依赖内核的功能，避免用户误以为可以修改。
             KsuIsValid {
                 SegmentedColumn(
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 13.dp),
@@ -120,6 +125,7 @@ fun SettingPagerMaterial(
                 )
             }
 
+            // UI 模式与主题只影响管理器外观，不需要内核支持。
             SegmentedColumn(
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 13.dp),
                 content = buildList {
@@ -129,6 +135,7 @@ fun SettingPagerMaterial(
                             title = stringResource(id = R.string.settings_ui_mode),
                             summary = stringResource(id = R.string.settings_ui_mode_summary),
                             items = UiMode.entries.map { it.name },
+                            // 索引 0 为 Miuix、1 为 Material，与 UiMode 下拉文案顺序一致。
                             selectedIndex = if (uiState.uiMode == UiMode.Material.value) 1 else 0,
                             onItemSelected = actions.onSetUiModeIndex
                         )
@@ -151,6 +158,7 @@ fun SettingPagerMaterial(
             )
 
             val profileTemplate = stringResource(id = R.string.settings_profile_template)
+            // 应用 profile 模板依赖 root 与内核接口，未激活时不展示。
             KsuIsValid {
                 SegmentedColumn(
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 13.dp),
@@ -172,6 +180,7 @@ fun SettingPagerMaterial(
             }
 
             KsuIsValid {
+                // 每个功能都有独立的内核能力状态：supported 才可编辑，managed/forced 表示由上层策略接管。
                 val suCompatModeItems = listOf(
                     stringResource(id = R.string.settings_mode_enable_by_default),
                     stringResource(id = R.string.settings_mode_disable_until_reboot),
@@ -279,6 +288,7 @@ fun SettingPagerMaterial(
                             )
                         },
                         {
+                            // late-load 模式下无法软重启，且开关强制显示为开启。
                             SegmentedSwitchItem(
                                 icon = Icons.Filled.RestartAlt,
                                 title = stringResource(id = R.string.settings_soft_reboot),
@@ -291,6 +301,7 @@ fun SettingPagerMaterial(
                     )
                 )
 
+                // 全局默认值与调试开关，作用于之后新授权或启动的应用。
                 SegmentedColumn(
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 13.dp),
                     content = listOf(
@@ -301,6 +312,16 @@ fun SettingPagerMaterial(
                                 summary = stringResource(id = R.string.settings_umount_modules_default_summary),
                                 checked = uiState.isDefaultUmountModules,
                                 onCheckedChange = actions.onSetDefaultUmountModules
+                            )
+                        },
+                        {
+                            // 实验性：由 ksud 根据标记文件校验安装包签名。
+                            SegmentedSwitchItem(
+                                icon = Icons.Filled.GppGood,
+                                title = stringResource(id = R.string.settings_module_integrity_check),
+                                summary = stringResource(id = R.string.settings_module_integrity_check_summary),
+                                checked = uiState.isModuleIntegrityCheckEnabled,
+                                onCheckedChange = actions.onSetModuleIntegrityCheckEnabled
                             )
                         },
                         {
@@ -326,6 +347,7 @@ fun SettingPagerMaterial(
                 )
             }
 
+            // 只有 LKM 模式才有由管理器加载的内核模块，才允许卸载。
             if (uiState.isLkmMode) {
                 SegmentedColumn(
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 13.dp),
@@ -334,6 +356,7 @@ fun SettingPagerMaterial(
                             val uninstall = stringResource(id = R.string.settings_uninstall)
                             SegmentedListItem(
                                 onClick = { showUninstallDialog.value = true },
+                                // late-load 模式下卸载内核可能使设备无法再次激活，禁止操作。
                                 enabled = !uiState.isLateLoadMode,
                                 headlineContent = { Text(uninstall) },
                                 leadingContent = { Icon(Icons.Filled.Delete, uninstall) }
@@ -343,6 +366,7 @@ fun SettingPagerMaterial(
                 )
             }
 
+            // 诊断与关于入口不依赖 root，未激活时也应可用。
             SegmentedColumn(
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 13.dp),
                 content = listOf(
@@ -386,6 +410,7 @@ fun SettingPagerMaterial(
     }
 }
 
+/** 设置页顶栏：标题固定为“设置”，滚动时折叠。 */
 @Composable
 private fun TopBar(
     scrollBehavior: TopAppBarScrollBehavior? = null

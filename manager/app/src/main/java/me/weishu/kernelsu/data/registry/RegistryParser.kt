@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.intOrNull
 
+/** 注册表协议相关异常的基类，便于调用方统一捕获。 */
 open class RegistryException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
 /** The document is not valid JSON or violates the protocol. */
@@ -31,12 +32,14 @@ class ModuleNotInIndexException(val moduleId: String) : RegistryException("Modul
 class RegistryParser(private val json: Json = DEFAULT_JSON) {
 
     companion object {
+        /** 宽松解析：忽略未知字段，但拒绝字符串化的数字/布尔（避免类型歧义）。 */
         val DEFAULT_JSON = Json {
             ignoreUnknownKeys = true
             isLenient = false
             explicitNulls = false
         }
 
+        /** buildId 为 16~64 位小写十六进制。 */
         private val BUILD_ID = Regex("^[0-9a-f]{16,64}$")
         private val MODULE_ID = Regex("^[a-zA-Z][a-zA-Z0-9._-]+$")
         private val SHA256 = Regex("^[0-9a-f]{64}$")
@@ -45,7 +48,9 @@ class RegistryParser(private val json: Json = DEFAULT_JSON) {
         /** GitHub "owner/name"; it becomes a link, so "." / ".." names are refused. */
         private val STARS_REPOSITORY = Regex("^[A-Za-z0-9-]+/(?!\\.\\.?$)[A-Za-z0-9._-]+$")
 
+        /** 模块 id 长度 2~64，且以字母开头。 */
         fun isValidModuleId(id: String): Boolean = id.length in 2..64 && MODULE_ID.matches(id)
+        /** 校验 buildId 格式；index 与 modules 的 buildId 必须都通过。 */
         fun isValidBuildId(id: String): Boolean = BUILD_ID.matches(id)
 
         /** Unknown kinds are hidden; a script can never be a metamodule (a manifest error upstream). */
@@ -53,6 +58,7 @@ class RegistryParser(private val json: Json = DEFAULT_JSON) {
             RegistryKind.isKnown(kind) && !(kind == RegistryKind.SCRIPT && metamodule)
     }
 
+    /** 解析为 JSON 对象并校验 schemaVersion；格式错误统一转成 [RegistryFormatException]。 */
     private fun parseObject(text: String): JsonObject {
         val element = try {
             json.parseToJsonElement(text)
@@ -62,11 +68,13 @@ class RegistryParser(private val json: Json = DEFAULT_JSON) {
             throw RegistryFormatException("Malformed JSON", e)
         }
         val obj = element as? JsonObject ?: throw RegistryFormatException("Expected a JSON object")
+        // schemaVersion 必须是数字；字符串形式视为无效。
         val version = (obj["schemaVersion"] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
         if (version != REGISTRY_API_SCHEMA_VERSION) throw UnsupportedSchemaException(version)
         return obj
     }
 
+    /** 将 JSON 反序列化为目标类型，序列化错误统一转成 [RegistryFormatException]。 */
     private fun <T> decode(deserializer: kotlinx.serialization.DeserializationStrategy<T>, element: JsonElement): T =
         try {
             json.decodeFromJsonElement(deserializer, element)
@@ -76,10 +84,12 @@ class RegistryParser(private val json: Json = DEFAULT_JSON) {
             throw RegistryFormatException("Invalid registry document: ${e.message}", e)
         }
 
+    /** 校验 buildId；不合法直接拒绝整份文档。 */
     private fun requireBuildId(buildId: String) {
         if (!isValidBuildId(buildId)) throw RegistryFormatException("Invalid buildId: $buildId")
     }
 
+    /** 解析索引文档，并校验模块列表路径相对且安全。 */
     fun parseIndex(text: String): ApiIndex {
         val index = decode(ApiIndex.serializer(), parseObject(text))
         requireBuildId(index.buildId)
@@ -87,6 +97,10 @@ class RegistryParser(private val json: Json = DEFAULT_JSON) {
         return index
     }
 
+    /**
+     * 解析模块列表：逐项校验，非法或重复 id 的条目被丢弃而不是失败整份文档。
+     * 返回的 [ApiModules] 固定使用当前客户端支持的 schemaVersion。
+     */
     fun parseModules(text: String): ApiModules {
         val obj = parseObject(text)
         val buildId = (obj["buildId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -98,12 +112,14 @@ class RegistryParser(private val json: Json = DEFAULT_JSON) {
             val summary = runCatching { decode(ApiModuleSummary.serializer(), sanitizeStars(element)) }.getOrNull()
                 ?.let(::validateSummary)
                 ?: return@mapNotNull null
+            // id 大小写不敏感地去重，防止同名模块出现两次。
             if (!seen.add(summary.id.lowercase())) return@mapNotNull null
             summary
         }
         return ApiModules(schemaVersion = REGISTRY_API_SCHEMA_VERSION, buildId = buildId, modules = modules)
     }
 
+    /** 解析模块详情，并清洗图标、README、链接与发布列表；非法发布条目会被单独丢弃。 */
     fun parseDetail(text: String): ApiModuleDetail {
         val obj = parseObject(text)
         // Releases are decoded one by one so a single bad entry is dropped, not the whole detail.
@@ -162,6 +178,7 @@ class RegistryParser(private val json: Json = DEFAULT_JSON) {
         )
     }
 
+    /** 校验列表项；任何关键字段非法都返回 null（由调用方丢弃该条目）。 */
     private fun validateSummary(s: ApiModuleSummary): ApiModuleSummary? {
         if (!isValidModuleId(s.id)) return null
         if (!RegistryUrls.isValidApiPath(s.detail)) return null
@@ -176,6 +193,7 @@ class RegistryParser(private val json: Json = DEFAULT_JSON) {
     // The ZIP URL is not tied to source.fullName: it is fixed when the release is listed and
     // keeps the old owner/repo after a rename or transfer. The download is pinned by SHA-256.
     private fun sanitizeRelease(r: ApiRelease): ApiRelease? {
+        // 只有不可变、带合法 SHA-256 且下载地址在白名单内的发布才允许安装。
         val valid = r.tag.isNotBlank() &&
             r.versionCode >= 1 &&
             r.immutable &&

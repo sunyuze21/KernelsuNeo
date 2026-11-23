@@ -18,8 +18,19 @@ package me.weishu.kernelsu.ui.webui;
 
 import java.net.URLConnection;
 
+/**
+ * 根据文件名猜测 MIME 类型。
+ *
+ * 先使用系统/扩展映射，再回退到与 Chromium 对齐的硬编码表；
+ * 供 WebView 资源加载与下载时设置 Content-Type。
+ */
 class MimeUtil {
 
+    /**
+     * 返回文件名对应的 MIME 类型，无法判断时返回 null。
+     *
+     * @param fileName 待判断的文件名，可为 null。
+     */
     public static String getMimeFromFileName(String fileName) {
         if (fileName == null) {
             return null;
@@ -43,6 +54,12 @@ class MimeUtil {
     // //net/base/mime_util.cc in Chromium.
     // A bunch of the mime types don't really apply to Android land
     // like word docs so feel free to filter out where necessary.
+    /**
+     * 硬编码扩展名到 MIME 的映射，补充系统未覆盖的媒体/字体类型。
+     *
+     * @param fileName 待判断的文件名。
+     * @return MIME 类型，未知扩展名返回 null。
+     */
     private static String guessHardcodedMime(String fileName) {
         int finalFullStop = fileName.lastIndexOf('.');
         if (finalFullStop == -1) {

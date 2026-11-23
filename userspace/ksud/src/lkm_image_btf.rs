@@ -21,7 +21,9 @@ use std::collections::BTreeSet;
 use anyhow::{Result, ensure};
 
 // BTF 头部魔数与版本，定义见内核 include/uapi/linux/btf.h。
+/// BTF 头部魔数，小端字节序列为 `9f eb`。
 const BTF_MAGIC: u16 = 0xeb9f;
+/// 当前支持的 BTF 版本；版本变化意味着头部或类型编码不兼容。
 const BTF_VERSION: u8 = 1;
 // 最小头部长度：魔数、版本、标志、hdr_len，以及四个 u32 的节描述
 // （类型区偏移/长度、字符串区偏移/长度）。
@@ -32,24 +34,43 @@ const BTF_MAGIC_BYTES: &[u8; 4] = b"\x9f\xeb\x01\x00";
 const ARM64_POINTER_SIZE: u64 = 8;
 
 // BTF kind 编号；属于内核 UAPI，取值不可更改。
+/// 整数类型；负载是 32 位编码，描述宽度与符号性。
 const BTF_KIND_INT: u8 = 1;
+/// 指针类型；`size_or_type` 为被指向类型的 id，大小取 `ARM64_POINTER_SIZE`。
 const BTF_KIND_PTR: u8 = 2;
+/// 数组类型；负载为 `btf_array`（元素类型 id、索引类型 id、元素个数）。
 const BTF_KIND_ARRAY: u8 = 3;
+/// 结构体类型；负载为若干 `btf_member`，成员按位偏移排列。
 const BTF_KIND_STRUCT: u8 = 4;
+/// 联合体类型；成员共享同一偏移，布局解析方式与结构体相同。
 const BTF_KIND_UNION: u8 = 5;
+/// 32 位枚举；负载为若干 `btf_enum`（名称偏移 + 有符号值）。
 const BTF_KIND_ENUM: u8 = 6;
+/// 前向声明；没有大小信息，因此 `type_size` 对它返回 `None`。
 const BTF_KIND_FWD: u8 = 7;
+/// typedef 别名；`size_or_type` 指向被定义的真实类型。
 const BTF_KIND_TYPEDEF: u8 = 8;
+/// volatile 限定符；解析时需要剥离才能得到底层类型。
 const BTF_KIND_VOLATILE: u8 = 9;
+/// const 限定符；解析时需要剥离才能得到底层类型。
 const BTF_KIND_CONST: u8 = 10;
+/// restrict 限定符；解析时需要剥离才能得到底层类型。
 const BTF_KIND_RESTRICT: u8 = 11;
+/// 函数记录；`size_or_type` 必须指向描述签名的 FUNC_PROTO。
 const BTF_KIND_FUNC: u8 = 12;
+/// 函数原型；`size_or_type` 是返回类型，`vlen` 只统计显式参数。
 const BTF_KIND_FUNC_PROTO: u8 = 13;
+/// 全局/静态变量；本解析器只保留其类型引用，不关心取值。
 const BTF_KIND_VAR: u8 = 14;
+/// 数据节；负载为 `btf_var_secinfo`，首字段必须引用 VAR 记录。
 const BTF_KIND_DATASEC: u8 = 15;
+/// 浮点类型；`size_or_type` 直接给出字节大小。
 const BTF_KIND_FLOAT: u8 = 16;
+/// 声明标签；负载为 32 位组件索引，本流程不解释其语义。
 const BTF_KIND_DECL_TAG: u8 = 17;
+/// 类型标签；与 typedef 类似，可沿链剥离到真实类型。
 const BTF_KIND_TYPE_TAG: u8 = 18;
+/// 64 位枚举；负载为 `btf_enum64`（名称偏移 + 值的低/高 32 位）。
 const BTF_KIND_ENUM64: u8 = 19;
 
 /// 内核 `struct load_info` 的字节布局，从 BTF 中恢复。
@@ -89,6 +110,7 @@ pub struct KernelBtf {
 /// `payload_offset` 处读取。
 #[derive(Clone, Copy, Debug)]
 struct BtfType {
+    /// BTF kind 编号（见 `BTF_KIND_*`），决定负载长度和 `size_or_type` 的解释方式。
     kind: u8,
     /// kind 相关负载中的元素个数（成员、参数等）。
     vlen: u16,
@@ -560,6 +582,8 @@ impl<'a> BtfCandidate<'a> {
     /// 调用约定就会出错。BTF 可能省略 FUNC 记录，因此缺失时静默通过，只
     /// 校验实际存在的记录。
     fn validate_function_abis(&self) -> Result<()> {
+        // 需要校验的内核函数及期望参数个数；镜像改写器会按这些签名固化调用，
+        // 参数个数一旦漂移就会破坏调用约定。
         const EXPECTED_ARITIES: &[(&str, u16)] = &[
             ("load_module", 3),
             ("vmalloc", 1),
@@ -647,6 +671,7 @@ pub fn find_btf_candidates(image: &[u8]) -> Vec<BtfCandidate<'_>> {
     candidates
 }
 
+/// 用最小化 BTF 数据块驱动的解析器单元测试。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,10 +680,12 @@ mod tests {
     /// 要求。
     #[derive(Default)]
     struct Strings {
+        /// 字节缓冲；偏移 0 固定为 NUL，保证空字符串始终可被引用。
         data: Vec<u8>,
     }
 
     impl Strings {
+        /// 创建只含起始 NUL 的字符串区，满足 BTF 对偏移 0 的约定。
         fn new() -> Self {
             Self { data: vec![0] }
         }
@@ -672,6 +699,7 @@ mod tests {
         }
     }
 
+    /// 以小端形式追加一个 u32；BTF 的所有整数字段都是小端编码。
     fn push_u32(output: &mut Vec<u8>, value: u32) {
         output.extend_from_slice(&value.to_le_bytes());
     }
@@ -775,6 +803,7 @@ mod tests {
         candidates[0].to_kernel_btf()
     }
 
+    /// 完整数据块应能恢复 `load_info` 布局，且偏移/大小与写入值一致。
     #[test]
     fn recovers_load_info_and_loading_module() {
         let blob = build_btf(&[(136, 16, 24)], &[2], 3);
@@ -793,6 +822,7 @@ mod tests {
         );
     }
 
+    /// 仅有魔数前缀、其余字段为零的伪数据块必须被丢弃，只保留后面真正的 BTF。
     #[test]
     fn ignores_false_magic_before_valid_btf() {
         let mut image = BTF_MAGIC_BYTES.to_vec();
@@ -801,6 +831,7 @@ mod tests {
         assert_eq!(find_btf_candidates(&image).len(), 1);
     }
 
+    /// 连续两个合法数据块都应被发现，且各自报告自己的起始偏移。
     #[test]
     fn returns_multiple_valid_btf_candidates() {
         let blob = build_btf(&[(136, 16, 24)], &[2], 3);
@@ -812,11 +843,13 @@ mod tests {
         assert_eq!(candidates[1].file_offset(), blob.len());
     }
 
+    /// 只有 4 字节魔数而没有头部其余部分时，应视为没有 BTF 而非报错。
     #[test]
     fn malformed_btf_is_treated_as_unavailable() {
         assert!(find_btf_candidates(BTF_MAGIC_BYTES).is_empty());
     }
 
+    /// 同一个 BTF 中出现两套不同的 `load_info` 布局时必须报错，不能任意选一套。
     #[test]
     fn rejects_conflicting_load_info_layouts() {
         let blob = build_btf(&[(136, 16, 24), (152, 24, 32)], &[2], 3);
@@ -828,6 +861,7 @@ mod tests {
         );
     }
 
+    /// `load_module` 的参数个数与固化调用约定不符时必须拒绝该 BTF。
     #[test]
     fn rejects_incompatible_load_module_arity() {
         let blob = build_btf(&[(136, 16, 24)], &[2], 2);
@@ -839,6 +873,7 @@ mod tests {
         );
     }
 
+    /// BTF 完全不含 ABI 记录时不应报错，调用方继续使用内置 GKI 默认值。
     #[test]
     fn missing_abi_records_use_callers_fallback() {
         let blob = build_btf(&[], &[], 0);
@@ -846,6 +881,7 @@ mod tests {
         assert_eq!(btf.load_info, None);
     }
 
+    /// `LOADING_MODULE` 枚举值不唯一说明数据块与加载器目标不一致，必须报错。
     #[test]
     fn rejects_conflicting_loading_module_values() {
         let blob = build_btf(&[(136, 16, 24)], &[2, 3], 3);

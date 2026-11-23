@@ -132,6 +132,8 @@
     <string name="require_kernel_version_gki">Kernel update required</string>
     <string name="settings_umount_modules_default">Umount modules by default</string>
     <string name="settings_umount_modules_default_summary">The global default value for \"Umount modules\" in App Profile. If enabled, it will remove all module modifications to the system for apps that don\'t have a profile set.</string>
+    <string name="settings_module_integrity_check">Module signature verification (experimental)</string>
+    <string name="settings_module_integrity_check_summary">Verify module signatures with the built-in public key when installing modules; unsigned or invalid modules will be rejected. Use with caution.</string>
     <string name="profile_umount_modules_summary">Enabling this option will allow KernelSU to restore any modified files by the modules for this app.</string>
     <string name="profile_selinux_domain">Domain</string>
     <string name="profile_selinux_rules">Rules</string>

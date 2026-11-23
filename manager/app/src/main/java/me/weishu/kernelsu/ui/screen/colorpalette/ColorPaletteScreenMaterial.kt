@@ -99,6 +99,13 @@ import me.weishu.kernelsu.ui.theme.keyColorOptions
 import me.weishu.kernelsu.ui.theme.rememberKernelSUColorScheme
 import kotlin.math.roundToInt
 
+/**
+ * 颜色设置页的 Material 3 实现。
+ *
+ * 布局以 [state] 为唯一数据源，所有修改通过 [actions] 回传；
+ * 预览卡片与色块都按当前主题模式实时生成颜色方案，未保存的滑块值
+ * 只保存在本地 Slider 状态中，松手后才写回，避免频繁持久化。
+ */
 @Composable
 fun ColorPaletteScreenMaterial(
     state: ColorPaletteUiState,
@@ -107,6 +114,7 @@ fun ColorPaletteScreenMaterial(
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
     val uiState = state.uiState
     val currentColorMode = state.currentColorMode
+    // 主色原始 ARGB 值，0 代表未指定、交由系统/默认取色
     val currentKeyColor = uiState.keyColor
     val colorStyle = state.currentPaletteStyle
     val colorSpec = state.currentColorSpec
@@ -128,6 +136,7 @@ fun ColorPaletteScreenMaterial(
     ) { paddingValues ->
         val navBars = WindowInsets.navigationBars.asPaddingValues()
         val captionBar = WindowInsets.captionBar.asPaddingValues()
+        // 系统模式需要结合当前是否深色主题来判断，AMOLED 则是独立的深色变体。
         val isDark = currentColorMode.isDark || currentColorMode.isSystem && isSystemInDarkTheme()
         val isAmoled = currentColorMode.isAmoled
 
@@ -163,6 +172,7 @@ fun ColorPaletteScreenMaterial(
                             paletteStyle = colorStyle,
                             colorSpec = colorSpec,
                             onClick = {
+                                // 选择“默认”时用 0 作为哨兵值，避免与真实黑色冲突。
                                 actions.onSetKeyColor(0)
                             }
                         )
@@ -185,6 +195,7 @@ fun ColorPaletteScreenMaterial(
             }
 
             item {
+                // 每个选项包成 list 以便后续按 4 个一组切分；AMOLED 与深色共用文案。
                 val options = listOf(
                     listOf(ColorMode.SYSTEM) to stringResource(R.string.settings_theme_mode_system),
                     listOf(ColorMode.LIGHT) to stringResource(R.string.settings_theme_mode_light),
@@ -243,6 +254,7 @@ fun ColorPaletteScreenMaterial(
                     modifier = Modifier.padding(horizontal = 16.dp),
                     content = listOf(
                         {
+                            // 风格枚举名直接作为持久化字符串，顺序以库定义为准。
                             val styles = PaletteStyle.entries
                             SegmentedDropdownItem(
                                 icon = Icons.Rounded.Style,
@@ -255,6 +267,7 @@ fun ColorPaletteScreenMaterial(
                             )
                         },
                         {
+                            // Spec 版本同样以枚举名持久化；indexOf 失败时回退到首项。
                             val specs = ColorSpec.SpecVersion.entries
                             SegmentedDropdownItem(
                                 icon = Icons.Rounded.DesignServices,
@@ -338,6 +351,7 @@ fun ColorPaletteScreenMaterial(
 
             item {
                 TonalCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+                    // 页面缩放范围 0.8~1.1，仅在拖动结束后持久化，避免抖动写入。
                     val sliderState = rememberSliderState(
                         value = uiState.pageScale,
                         trackRange = 0.8f..1.1f
@@ -389,6 +403,7 @@ fun ColorPaletteScreenMaterial(
 
             item {
                 TonalCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+                    // 模块描述最多显示行数，1~5 行且步进为整数，故设置 steps=3。
                     val sliderState = rememberSliderState(
                         value = uiState.moduleDescriptionMaxLines.toFloat(),
                         steps = 3,
@@ -448,6 +463,12 @@ fun ColorPaletteScreenMaterial(
     }
 }
 
+/**
+ * 主题预览卡片：按真实屏幕宽高比缩略展示首页配色效果。
+ *
+ * 预览会重新跑一次动态取色，因此 [keyColor]、[paletteStyle]、[colorSpec]
+ * 必须与实际主题保持一致；使用屏幕比例是为了让横竖屏下的缩略形状可信。
+ */
 @SuppressLint("ConfigurationScreenWidthHeight")
 @Composable
 private fun ThemePreviewCard(
@@ -458,11 +479,14 @@ private fun ThemePreviewCard(
     colorSpec: ColorSpec.SpecVersion = ColorSpec.SpecVersion.SPEC_2025,
 ) {
     val configuration = LocalConfiguration.current
+    // 用屏幕宽高比而非固定比例，保证预览与设备实际布局一致。
     val screenWidth = configuration.screenWidthDp.toFloat()
     val screenHeight = configuration.screenHeightDp.toFloat()
     val screenRatio = screenWidth / screenHeight
+    // 大屏/横屏会使用侧边导航栏，预览需切换成对应的骨架。
     val useRail = useNavigationRail(enableFloatingBottomBar = false)
 
+    // keyColor 为 0 时交给系统默认取色，不能传 Color(0) 变成纯黑。
     val colorScheme = rememberKernelSUColorScheme(
         seedColor = if (keyColor == 0) Color.Unspecified else Color(keyColor),
         isDark = isDark,
@@ -503,6 +527,7 @@ private fun ThemePreviewCard(
                 }
 
                 BoxWithConstraints(modifier = Modifier.weight(1f)) {
+                    // 高度不足时省略信息卡，避免预览被挤压变形。
                     val showInfoCard = maxHeight >= 72.dp
                     Column(
                         modifier = Modifier
@@ -577,6 +602,12 @@ private fun ThemePreviewCard(
     }
 }
 
+/**
+ * 主色选择色块。
+ *
+ * 每个色块都独立生成配色方案并绘制上下半圆，让用户直接看到该主色
+ * 在 Material 中的实际观感；选中态用对勾与缩放动画区分。
+ */
 @Composable
 private fun ColorButtonMaterial(
     color: Color,
@@ -621,6 +652,7 @@ private fun ColorButtonMaterial(
                 )
             }
 
+            // 选中时轻微放大，形成可感知的反馈但不改变点击热区。
             val scale by animateFloatAsState(targetValue = if (isSelected) 1.1f else 1.0f)
             Box(
                 modifier = Modifier.graphicsLayer {

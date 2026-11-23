@@ -79,12 +79,14 @@ import me.weishu.kernelsu.ui.viewmodel.SuperUserViewModel
  * @author weishu
  * @date 2023/5/16.
  */
+// 应用 profile 的 Material 3 布局：顶部展示应用信息，中部切换 root 策略模式。
 @Composable
 fun AppProfileScreenMaterial(
     state: AppProfileUiState,
     actions: AppProfileActions,
     snackBarHost: SnackbarHostState,
 ) {
+    // 折叠式顶栏与内容滚动联动，滚动时标题自动收起。
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
 
     ExpressiveScaffold(
@@ -93,8 +95,10 @@ fun AppProfileScreenMaterial(
                 onBack = actions.onBack,
                 scrollBehavior = scrollBehavior,
                 isUidGroup = state.isUidGroup,
+                // WebView zygote 没有可交互界面，启动/停止/重启没有意义。
                 showActions = !state.appGroup.primary.isWebViewZygote,
                 packageName = state.packageName,
+                // Android 多用户 uid 编码为 userId * 100000 + appId。
                 userId = state.uid / 100000,
                 onLaunchApp = actions.onLaunchApp,
                 onForceStopApp = actions.onForceStopApp,
@@ -108,9 +112,11 @@ fun AppProfileScreenMaterial(
             modifier = Modifier
                 .padding(paddingValues)
                 .fillMaxHeight()
+                // 键盘弹出时抬高内容，避免自定义规则输入框被遮挡。
                 .imePadding()
                 .nestedScroll(scrollBehavior.nestedScrollConnection)
                 .verticalScroll(rememberScrollState()),
+            // 共享 uid 时没有单一包名，改用组名与受影响应用列表展示。
             packageName = if (state.isUidGroup) {
                 ""
             } else {
@@ -127,6 +133,7 @@ fun AppProfileScreenMaterial(
                 )
             },
             appUid = state.uid,
+            // 共享 uid 时才展示 sharedUserId 提示。
             sharedUserId = if (state.isUidGroup) state.sharedUserId else "",
             appVersionName = if (state.isUidGroup) "" else (state.appGroup.primary.packageInfo.versionName ?: ""),
             appVersionCode = if (state.isUidGroup) 0L else state.appGroup.primary.packageInfo.longVersionCode,
@@ -141,6 +148,10 @@ fun AppProfileScreenMaterial(
     }
 }
 
+/**
+ * 应用 profile 的主体内容：应用信息、root 开关和策略编辑区。
+ * 是否展示 root 策略完全由 [isSpecialApp] 与 [Natives.Profile.allowSu] 决定。
+ */
 @Composable
 private fun AppProfileInner(
     modifier: Modifier = Modifier,
@@ -159,10 +170,13 @@ private fun AppProfileInner(
     onManageTemplate: () -> Unit = {},
     onProfileChange: (Natives.Profile) -> Unit,
 ) {
+    // 特殊应用（如 shell、system）不能通过此页授予 root。
     val isRootGranted = !isSpecialApp && profile.allowSu
+    // Android 多用户 uid 编码：userId * 100000 + appId。
     val userId = appUid / 100000
     val appId = appUid % 100000
 
+    // 模板优先于自定义：rootUseDefault 为 true 时跟随默认策略。
     val initialRootMode = if (profile.rootUseDefault) {
         Mode.Default
     } else if (profile.rootTemplate != null) {
@@ -170,9 +184,11 @@ private fun AppProfileInner(
     } else {
         Mode.Custom
     }
+    // 以 profile 为 key，外部策略变化时重置本地模式草稿。
     var rootMode by rememberSaveable(profile) {
         mutableStateOf(initialRootMode)
     }
+    // 非 root 只有默认与自定义两种状态，没有模板概念。
     val nonRootMode = if (profile.nonRootUseDefault) Mode.Default else Mode.Custom
     val mode = if (isRootGranted) rootMode else nonRootMode
 
@@ -207,6 +223,7 @@ private fun AppProfileInner(
                         trailingContent = {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 if (userId != 0) {
+                                    // 非主用户时同时展示 userId 与 appId，避免只看 appId 产生歧义。
                                     StatusTag(
                                         label = "USER $userId",
                                         contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
@@ -246,11 +263,13 @@ private fun AppProfileInner(
             }
         )
 
+        // root 开关切换时用 Crossfade 过渡，避免编辑区高度突然跳变。
         Crossfade(targetState = isRootGranted, label = "") { current ->
             Column(
                 modifier = Modifier.padding(bottom = 6.dp + 48.dp + 6.dp /* SnackBar height */)
             ) {
                 if (current) {
+                    // root 模式支持 Template；选择 Default/Custom 时清空已有模板。
                     ProfileBox(mode, true) {
                         // template mode shouldn't change profile here!
                         if (it == Mode.Default || it == Mode.Custom) {
@@ -263,6 +282,7 @@ private fun AppProfileInner(
                         }
                         rootMode = it
                     }
+                    // 选择 Template 时继续展示模板选择与查看入口。
                     AnimatedVisibility(
                         visible = mode == Mode.Template,
                         enter = expandVertically() + fadeIn(),
@@ -275,6 +295,7 @@ private fun AppProfileInner(
                             onProfileChange = onProfileChange
                         )
                     }
+                    // Custom 模式才允许编辑 uid/gid/SELinux 等底层字段。
                     AnimatedVisibility(
                         visible = mode == Mode.Custom,
                         enter = expandVertically() + fadeIn(),
@@ -288,6 +309,7 @@ private fun AppProfileInner(
                         )
                     }
                 } else {
+                    // 非 root 状态只需要控制卸载模块等应用级行为。
                     ProfileBox(mode, false) {
                         onProfileChange(profile.copy(nonRootUseDefault = (it == Mode.Default)))
                     }
@@ -305,6 +327,7 @@ private fun AppProfileInner(
                     }
                 }
                 if (isUidGroup) {
+                    // 共享 uid 时列出所有受影响应用，提醒用户策略是整组生效的。
                     val appItems = affectedApps.map<SuperUserViewModel.AppInfo, @Composable () -> Unit> { app ->
                         {
                             SegmentedListItem(
@@ -331,6 +354,10 @@ private fun AppProfileInner(
     }
 }
 
+/**
+ * 应用 profile 顶栏：除返回外，仅在普通单应用且非 WebView zygote 时提供更多菜单。
+ * 菜单动作需要包名与 userId，因此由调用方一并传入。
+ */
 @Composable
 private fun TopBar(
     onBack: () -> Unit,
@@ -350,6 +377,7 @@ private fun TopBar(
             TopBarBackButton(onClick = onBack)
         },
         actions = {
+            // 共享 uid 或 WebView zygote 没有明确的单一应用可操作。
             if (!isUidGroup && showActions) {
                 var showDropdown by remember { mutableStateOf(false) }
 
@@ -364,6 +392,7 @@ private fun TopBar(
                         expanded = showDropdown,
                         onDismissRequest = { showDropdown = false }
                     ) {
+                        // 三个动作都针对同一 uid 下的应用实例。
                         val menuItems = listOf(
                             R.string.launch_app to onLaunchApp,
                             R.string.force_stop_app to onForceStopApp,
@@ -393,6 +422,10 @@ private fun TopBar(
     )
 }
 
+/**
+ * root/非 root 策略模式选择器：Default、Template、Custom 三选一。
+ * Template 只在已有可用模板时才能选中，避免用户进入空的模板编辑页。
+ */
 @Composable
 private fun ProfileBox(
     mode: Mode,
@@ -416,6 +449,7 @@ private fun ProfileBox(
             ExpressiveToggleButton(
                 checked = mode == m,
                 onCheckedChange = { checked ->
+                    // 单选组只响应选中事件；Template 无模板时保持禁用。
                     if (checked && (m != Mode.Template || hasTemplate)) {
                         haptic.performHapticFeedback(HapticFeedbackType.ContextClick)
                         onModeChange(m)
@@ -437,6 +471,7 @@ private fun ProfileBox(
     }
 }
 
+// 预览：普通应用在 root 授权下打开 profile 编辑区。
 @Preview
 @Composable
 private fun AppProfilePreview() {

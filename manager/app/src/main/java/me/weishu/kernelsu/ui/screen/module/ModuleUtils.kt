@@ -24,11 +24,13 @@ import androidx.compose.ui.unit.TextUnit
 import me.weishu.kernelsu.ui.util.module.Shortcut
 import kotlin.math.roundToInt
 
+/** 模块快捷方式的两种目标：执行动作脚本或打开 WebUI。 */
 enum class ShortcutType {
     Action,
     WebUI
 }
 
+/** 查询指定模块是否已创建对应类型的桌面快捷方式。 */
 fun hasModuleShortcut(context: Context, moduleId: String, type: ShortcutType): Boolean {
     return when (type) {
         ShortcutType.Action -> Shortcut.hasModuleActionShortcut(context, moduleId)
@@ -36,6 +38,7 @@ fun hasModuleShortcut(context: Context, moduleId: String, type: ShortcutType): B
     }
 }
 
+/** 删除模块快捷方式；模块卸载或类型切换后需要清理旧快捷方式。 */
 fun deleteModuleShortcut(context: Context, moduleId: String, type: ShortcutType) {
     when (type) {
         ShortcutType.Action -> Shortcut.deleteModuleActionShortcut(context, moduleId)
@@ -43,6 +46,7 @@ fun deleteModuleShortcut(context: Context, moduleId: String, type: ShortcutType)
     }
 }
 
+/** 创建模块快捷方式；iconUri 为空时交给底层选择默认图标。 */
 fun createModuleShortcut(
     context: Context,
     moduleId: String,
@@ -71,11 +75,18 @@ fun createModuleShortcut(
     }
 }
 
+/** 描述文本的两种测量槽位；分别用于折叠态与展开态的测量。 */
 private enum class DescriptionSlot {
     Collapsed,
     Expanded
 }
 
+/**
+ * 可展开的描述文本。
+ *
+ * 内部用同一段文本测量折叠/展开两种高度，再按动画进度插值高度，
+ * 因此展开动画期间不会出现布局跳变；是否可展开由测量结果回传给调用方。
+ */
 @Composable
 fun ExpandableDescriptionText(
     text: String,
@@ -88,12 +99,14 @@ fun ExpandableDescriptionText(
     textDecoration: TextDecoration? = null,
     onCanExpandChange: (Boolean) -> Unit = {},
 ) {
+    // 动画进度锁定在没有重组开销的对象里；重置时以 text 为 key，避免换文本后残留旧进度
     val progress = remember(text) { Animatable(if (expanded) 1f else 0f) }
     var canExpand by remember { mutableStateOf(true) }
 
     LaunchedEffect(expanded) {
         val target = if (expanded) 1f else 0f
         if (progress.targetValue != target) {
+            // 展开与收起使用不同曲线，避免收起时显得拖沓
             val spec = if (expanded) {
                 tween<Float>(durationMillis = 280, easing = FastOutSlowInEasing)
             } else {
@@ -103,6 +116,7 @@ fun ExpandableDescriptionText(
         }
     }
 
+    // 可展开性来自测量结果，必须回调给调用方以决定是否显示“展开”按钮
     LaunchedEffect(canExpand, onCanExpandChange) {
         onCanExpandChange(canExpand)
     }
@@ -110,6 +124,7 @@ fun ExpandableDescriptionText(
     SubcomposeLayout(
         modifier = modifier.clipToBounds()
     ) { constraints ->
+        // 折叠态用于确定最小高度，也作为不可展开时的唯一展示内容
         val collapsedPlaceable = subcompose(DescriptionSlot.Collapsed) {
             Text(
                 text = text,
@@ -122,6 +137,7 @@ fun ExpandableDescriptionText(
             )
         }.first().measure(constraints)
 
+        // 展开态不限行数，仅用于测量完整高度
         val expandedPlaceable = subcompose(DescriptionSlot.Expanded) {
             Text(
                 text = text,
@@ -137,6 +153,7 @@ fun ExpandableDescriptionText(
         val collapsedHeight = collapsedPlaceable.height
         val expandedHeight = expandedPlaceable.height
         val canExpandNow = expandedHeight > collapsedHeight
+        // 在布局阶段写入状态会触发下一帧重组，这里仅在值变化时写入以免死循环
         if (canExpand != canExpandNow) {
             canExpand = canExpandNow
         }
@@ -149,9 +166,11 @@ fun ExpandableDescriptionText(
             }
         } else {
             val currentProgress = progress.value
+            // 高度在折叠与展开之间线性插值，保证父容器裁剪时不闪烁
             val currentHeight = (collapsedHeight + (expandedHeight - collapsedHeight) * currentProgress)
                 .roundToInt()
                 .coerceIn(constraints.minHeight, constraints.maxHeight)
+            // 进度为 0 时优先放折叠文本，避免展开文本在收起瞬间先出现一次
             val placeableToUse = if (currentProgress == 0f) collapsedPlaceable else expandedPlaceable
             val width = placeableToUse.width.coerceIn(constraints.minWidth, constraints.maxWidth)
 

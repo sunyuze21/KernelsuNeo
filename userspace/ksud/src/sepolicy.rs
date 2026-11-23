@@ -77,6 +77,10 @@ fn parse_seobj_no_star(input: &str) -> IResult<&str, SeObject<'_>> {
 
 /// 每种语句共用的一步解析接口，把 nom 的解析器统一到 `Self::parse` 上。
 trait SeObjectParser<'a> {
+    /// 按具体语句类型的语法解析输入，返回剩余输入和解析结果。
+    ///
+    /// 实现方必须完整消费自己的关键字与参数；失败时返回 nom 错误，让上层 `alt`
+    /// 继续尝试其他语句类型。输入已由调用方去掉首尾空白。
     fn parse(input: &'a str) -> IResult<&'a str, Self>
     where
         Self: Sized;
@@ -85,118 +89,162 @@ trait SeObjectParser<'a> {
 /// `allow`/`deny`/`auditallow`/`dontaudit` 语句：源、目标、class 和权限都可以是列表。
 #[derive(Debug, PartialEq, Eq, new)]
 struct NormalPerm<'a> {
+    /// 原始操作符，决定内核 subcmd；解析阶段只可能是四种普通权限操作。
     op: &'a str,
+    /// 源类型集合；`*` 展开成 `PolicyObject::All`。
     source: SeObject<'a>,
+    /// 目标类型集合。
     target: SeObject<'a>,
+    /// 目标 class 集合，例如 `file`、`dir`。
     class: SeObject<'a>,
+    /// 权限集合；每个权限最终单独生成一条原子语句。
     perm: SeObject<'a>,
 }
 
 /// `allowxperm` 系列：在普通权限之外多一个 ioctl 操作名。
 #[derive(Debug, PartialEq, Eq, new)]
 struct XPerm<'a> {
+    /// 原始操作符，决定 xperm 的 subcmd。
     op: &'a str,
+    /// 源类型集合。
     source: SeObject<'a>,
+    /// 目标类型集合。
     target: SeObject<'a>,
+    /// 目标 class 集合（通常是 `ioctl` 相关 class）。
     class: SeObject<'a>,
+    /// ioctl 操作名，单裸词，写入原子命令第 4 槽。
     operation: &'a str,
+    /// xperm 权限位集合；每个元素生成一条命令。
     perm_set: SeObject<'a>,
 }
 
 /// `permissive`/`enforce`：切换一个或多个类型的强制模式。
 #[derive(Debug, PartialEq, Eq, new)]
 struct TypeState<'a> {
+    /// `permissive` 或 `enforce`。
     op: &'a str,
+    /// 要切换状态的具体类型集合，不允许通配。
     stype: SeObject<'a>,
 }
 
 /// `typeattribute`/`attradd`：把类型加入属性。
 #[derive(Debug, PartialEq, Eq, new)]
 struct TypeAttr<'a> {
+    /// 要加入属性的类型集合。
     stype: SeObject<'a>,
+    /// 目标属性集合。
     sattr: SeObject<'a>,
 }
 
 /// `type`：声明一个新类型及其属性。
 #[derive(Debug, PartialEq, Eq, new)]
 struct Type<'a> {
+    /// 新类型的名字，单裸词。
     name: &'a str,
+    /// 类型所属属性；缺省时解析器填入 `domain`。
     attrs: SeObject<'a>,
 }
 
 /// `attribute`：声明一个属性。
 #[derive(Debug, PartialEq, Eq, new)]
 struct Attr<'a> {
+    /// 新属性的名字，单裸词。
     name: &'a str,
 }
 
 /// `type_transition`/`name_transition`：目标对象上的自动类型转换。
 #[derive(Debug, PartialEq, Eq, new)]
 struct TypeTransition<'a> {
+    /// 转换发生时的源类型。
     source: &'a str,
+    /// 目标对象所属类型。
     target: &'a str,
+    /// 目标对象 class。
     class: &'a str,
+    /// 新建对象使用的默认类型。
     default_type: &'a str,
+    /// 可选对象名；`None` 表示规则不限定对象名。
     object_name: Option<&'a str>,
 }
 
 /// `type_change`/`type_member`：重新标记已有对象时的类型规则。
 #[derive(Debug, PartialEq, Eq, new)]
 struct TypeChange<'a> {
+    /// `type_change` 或 `type_member`。
     op: &'a str,
+    /// 重新标记时的源类型。
     source: &'a str,
+    /// 目标对象所属类型。
     target: &'a str,
+    /// 目标对象 class。
     class: &'a str,
+    /// 重标记后使用的类型。
     default_type: &'a str,
 }
 
 /// `genfscon`：为伪文件系统路径指定固定 context。
 #[derive(Debug, PartialEq, Eq, new)]
 struct GenFsCon<'a> {
+    /// 伪文件系统名，例如 `proc`、`sysfs`。
     fs_name: &'a str,
+    /// 文件系统中的部分路径。
     partial_path: &'a str,
+    /// 该路径应获得的完整 SELinux context。
     fs_context: &'a str,
 }
 
 /// 一条已解析的策略语句；变体与内核支持的 sepolicy 命令一一对应。
 #[derive(Debug)]
 enum PolicyStatement<'a> {
+    /// 普通 `allow`/`deny`/`auditallow`/`dontaudit` 规则。
     // "allow *source_type *target_type *class *perm_set"
     // "deny *source_type *target_type *class *perm_set"
     // "auditallow *source_type *target_type *class *perm_set"
     // "dontaudit *source_type *target_type *class *perm_set"
     NormalPerm(NormalPerm<'a>),
 
+    /// 扩展权限规则：在 class 之外额外携带 ioctl 操作名和权限位集。
     // "allowxperm *source_type *target_type *class operation xperm_set"
     // "auditallowxperm *source_type *target_type *class operation xperm_set"
     // "dontauditxperm *source_type *target_type *class operation xperm_set"
     XPerm(XPerm<'a>),
 
+    /// 类型强制/宽容状态切换。
     // "permissive ^type"
     // "enforce ^type"
     TypeState(TypeState<'a>),
 
+    /// 新类型声明。
     // "type type_name ^(attribute)"
     Type(Type<'a>),
 
+    /// 类型到属性的成员关系。
     // "typeattribute ^type ^attribute"
     TypeAttr(TypeAttr<'a>),
 
+    /// 新属性声明。
     // "attribute ^attribute"
     Attr(Attr<'a>),
 
+    /// 新建对象时的自动类型转换。
     // "type_transition source_type target_type class default_type (object_name)"
     TypeTransition(TypeTransition<'a>),
 
+    /// 重新标记已有对象时的类型规则。
     // "type_change source_type target_type class default_type"
     // "type_member source_type target_type class default_type"
     TypeChange(TypeChange<'a>),
 
+    /// 伪文件系统路径的固定 SELinux context。
     // "genfscon fs_name partial_path fs_context"
     GenFsCon(GenFsCon<'a>),
 }
 
 impl<'a> SeObjectParser<'a> for NormalPerm<'a> {
+    /// 解析 `allow`/`deny`/`auditallow`/`dontaudit` 语句。
+    ///
+    /// 四个位置参数都允许通配符或 `{...}` 集合；关键字后强制要求空白，
+    /// 因此不会把 `allowxperm` 误识别成 `allow`。
     fn parse(input: &'a str) -> IResult<&'a str, Self> {
         let (input, op) = alt((
             tag("allow"),
@@ -219,6 +267,9 @@ impl<'a> SeObjectParser<'a> for NormalPerm<'a> {
 }
 
 impl<'a> SeObjectParser<'a> for XPerm<'a> {
+    /// 解析 `allowxperm`/`auditallowxperm`/`dontauditxperm` 语句。
+    ///
+    /// `operation` 必须是单裸词（不允许集合），`perm_set` 才允许通配或集合。
     fn parse(input: &'a str) -> IResult<&'a str, Self> {
         let (input, op) = alt((
             tag("allowxperm"),
@@ -246,6 +297,9 @@ impl<'a> SeObjectParser<'a> for XPerm<'a> {
 }
 
 impl<'a> SeObjectParser<'a> for TypeState<'a> {
+    /// 解析 `permissive`/`enforce` 类型状态切换。
+    ///
+    /// 这里刻意不接受 `*`：状态必须落到具体类型，通配会改变全局策略语义。
     fn parse(input: &'a str) -> IResult<&'a str, Self> {
         let (input, op) = alt((tag("permissive"), tag("enforce"))).parse(input)?;
 
@@ -257,6 +311,10 @@ impl<'a> SeObjectParser<'a> for TypeState<'a> {
 }
 
 impl<'a> SeObjectParser<'a> for Type<'a> {
+    /// 解析 `type` 声明，属性列表在缺省时默认为 `domain`。
+    ///
+    /// 关键字后的 `space1` 区分了 `type` 与 `typeattribute`/`type_transition`，
+    /// 前缀相同的语句不会互相误匹配。
     fn parse(input: &'a str) -> IResult<&'a str, Self> {
         // `tag("type")` 也会匹配到 `typeattribute`/`type_transition` 的开头，但紧跟的 `space1`
         // 会因下划线而失败，于是 alt 会继续尝试后面的解析器。
@@ -276,6 +334,9 @@ impl<'a> SeObjectParser<'a> for Type<'a> {
 }
 
 impl<'a> SeObjectParser<'a> for TypeAttr<'a> {
+    /// 解析 `typeattribute`/`attradd`，把类型加入一个或多个属性。
+    ///
+    /// 类型和属性两侧都不允许通配，避免把属性成员关系错误地广播给全部类型。
     fn parse(input: &'a str) -> IResult<&'a str, Self> {
         let (input, _) = alt((tag("typeattribute"), tag("attradd"))).parse(input)?;
         let (input, _) = space1(input)?;
@@ -288,6 +349,7 @@ impl<'a> SeObjectParser<'a> for TypeAttr<'a> {
 }
 
 impl<'a> SeObjectParser<'a> for Attr<'a> {
+    /// 解析 `attribute` 声明；属性名只能是单个裸词。
     fn parse(input: &'a str) -> IResult<&'a str, Self> {
         let (input, _) = tag("attribute")(input)?;
         let (input, _) = space1(input)?;
@@ -298,6 +360,9 @@ impl<'a> SeObjectParser<'a> for Attr<'a> {
 }
 
 impl<'a> SeObjectParser<'a> for TypeTransition<'a> {
+    /// 解析 `type_transition`/`name_transition` 自动类型转换。
+    ///
+    /// 对象名是可选尾项；没有对象名时编码为 `None`，与内核的五参数格式对应。
     fn parse(input: &'a str) -> IResult<&'a str, Self> {
         let (input, _) = alt((tag("type_transition"), tag("name_transition"))).parse(input)?;
         let (input, _) = space1(input)?;
@@ -328,6 +393,9 @@ impl<'a> SeObjectParser<'a> for TypeTransition<'a> {
 }
 
 impl<'a> SeObjectParser<'a> for TypeChange<'a> {
+    /// 解析 `type_change`/`type_member` 重标记规则。
+    ///
+    /// 源、目标、class 和默认类型都必须是单裸词，不支持集合或通配。
     fn parse(input: &'a str) -> IResult<&'a str, Self> {
         let (input, op) = alt((tag("type_change"), tag("type_member"))).parse(input)?;
         let (input, _) = space1(input)?;
@@ -344,6 +412,10 @@ impl<'a> SeObjectParser<'a> for TypeChange<'a> {
 }
 
 impl<'a> SeObjectParser<'a> for GenFsCon<'a> {
+    /// 解析 `genfscon`，为伪文件系统路径绑定固定 SELinux context。
+    ///
+    /// 三个参数（文件系统名、部分路径、context）都是单裸词；context 原样交给
+    /// 内核，不做合法性校验。
     fn parse(input: &'a str) -> IResult<&'a str, Self>
     where
         Self: Sized,
@@ -423,6 +495,7 @@ enum PolicyObject {
 }
 
 impl TryFrom<&str> for PolicyObject {
+    /// 参数编码失败时返回的错误类型。
     type Error = anyhow::Error;
     /// 拒绝 NUL，因为内核按 C 字符串解析这些参数。
     fn try_from(s: &str) -> Result<Self> {
@@ -441,19 +514,33 @@ impl TryFrom<&str> for PolicyObject {
 #[allow(clippy::too_many_arguments)]
 #[derive(Debug, new)]
 struct AtomicStatement {
+    /// 内核命令号，决定后续参数个数与解释方式。
     cmd: u32,
+    /// 命令子类型，例如 allow/deny 或 type_change/type_member。
     subcmd: u32,
+    /// 第 1 个参数槽，含义随 cmd 变化（如源类型）。
     sepol1: PolicyObject,
+    /// 第 2 个参数槽（如目标类型或属性）。
     sepol2: PolicyObject,
+    /// 第 3 个参数槽（如 class 或 context）。
     sepol3: PolicyObject,
+    /// 第 4 个参数槽（如权限或默认类型）。
     sepol4: PolicyObject,
+    /// 第 5 个参数槽（如 xperm 位集或可选对象名）。
     sepol5: PolicyObject,
+    /// 第 6 个参数槽；超出命令参数个数时不会序列化。
     sepol6: PolicyObject,
+    /// 第 7 个参数槽；超出命令参数个数时不会序列化。
     sepol7: PolicyObject,
 }
 
 impl<'a> TryFrom<&'a NormalPerm<'a>> for Vec<AtomicStatement> {
+    /// 展开失败时返回的错误类型。
     type Error = anyhow::Error;
+    /// 对 source/target/class/perm 做笛卡尔积，每个组合生成一条四参数命令。
+    ///
+    /// 任一名字含 NUL 都会让整条语句转换失败，避免内核按 C 字符串截断后
+    /// 把规则应用到错误的类型或权限上。
     fn try_from(perm: &'a NormalPerm<'a>) -> Result<Self> {
         let mut result = vec![];
         // 下划线分支只是兜底：解析器只会产生上面四种 op。
@@ -489,9 +576,14 @@ impl<'a> TryFrom<&'a NormalPerm<'a>> for Vec<AtomicStatement> {
 }
 
 impl<'a> TryFrom<&'a XPerm<'a>> for Vec<AtomicStatement> {
+    /// 展开失败时返回的错误类型。
     type Error = anyhow::Error;
+    /// 对 source/target/class/perm_set 做笛卡尔积，`operation` 固定占第 4 槽。
+    ///
+    /// 每个 perm_set 元素生成一条命令；含 NUL 的名字同样会被拒绝。
     fn try_from(perm: &'a XPerm<'a>) -> Result<Self> {
         let mut result = vec![];
+        // operation 固定不变，只有 perm_set 的每个元素各自生成一条命令。
         let subcmd = match perm.op {
             "allowxperm" => crate::ksu_uapi::KSU_SEPOLICY_SUBCMD_XPERM_ALLOW,
             "auditallowxperm" => crate::ksu_uapi::KSU_SEPOLICY_SUBCMD_XPERM_AUDITALLOW,
@@ -522,9 +614,12 @@ impl<'a> TryFrom<&'a XPerm<'a>> for Vec<AtomicStatement> {
 }
 
 impl<'a> TryFrom<&'a TypeState<'a>> for Vec<AtomicStatement> {
+    /// 展开失败时返回的错误类型。
     type Error = anyhow::Error;
+    /// 每个类型生成一条单参数命令，子命令沿用 permissive/enforce。
     fn try_from(perm: &'a TypeState<'a>) -> Result<Self> {
         let mut result = vec![];
+        // 每个类型独立成一条命令，避免通配语义意外影响未列出的类型。
         let subcmd = match perm.op {
             "permissive" => crate::ksu_uapi::KSU_SEPOLICY_SUBCMD_TYPE_STATE_PERMISSIVE,
             "enforce" => crate::ksu_uapi::KSU_SEPOLICY_SUBCMD_TYPE_STATE_ENFORCE,
@@ -548,9 +643,14 @@ impl<'a> TryFrom<&'a TypeState<'a>> for Vec<AtomicStatement> {
 }
 
 impl<'a> TryFrom<&'a Type<'a>> for Vec<AtomicStatement> {
+    /// 展开失败时返回的错误类型。
     type Error = anyhow::Error;
+    /// 每个属性生成一条 `type name attr` 命令。
+    ///
+    /// 解析器保证 `attrs` 至少含一项（缺省为 `domain`），因此不会产生空批次。
     fn try_from(perm: &'a Type<'a>) -> Result<Self> {
         let mut result = vec![];
+        // 一个类型声明可能关联多个属性，需要拆成多条原子命令。
         for &attr in &perm.attrs {
             result.push(AtomicStatement {
                 cmd: crate::ksu_uapi::KSU_SEPOLICY_CMD_TYPE,
@@ -569,9 +669,12 @@ impl<'a> TryFrom<&'a Type<'a>> for Vec<AtomicStatement> {
 }
 
 impl<'a> TryFrom<&'a TypeAttr<'a>> for Vec<AtomicStatement> {
+    /// 展开失败时返回的错误类型。
     type Error = anyhow::Error;
+    /// 对类型集合与属性集合做笛卡尔积，每个组合生成一条两参数命令。
     fn try_from(perm: &'a TypeAttr<'a>) -> Result<Self> {
         let mut result = vec![];
+        // 类型和属性都可能写成集合，按笛卡尔积逐对展开。
         for &t in &perm.stype {
             for &attr in &perm.sattr {
                 result.push(AtomicStatement {
@@ -592,8 +695,11 @@ impl<'a> TryFrom<&'a TypeAttr<'a>> for Vec<AtomicStatement> {
 }
 
 impl<'a> TryFrom<&'a Attr<'a>> for Vec<AtomicStatement> {
+    /// 展开失败时返回的错误类型。
     type Error = anyhow::Error;
+    /// 属性声明只有名字一个参数，固定生成一条命令。
     fn try_from(perm: &'a Attr<'a>) -> Result<Self> {
+        // 属性声明没有子命令，只占用一个参数槽。
         let result = vec![AtomicStatement {
             cmd: crate::ksu_uapi::KSU_SEPOLICY_CMD_ATTR,
             subcmd: 0,
@@ -610,9 +716,12 @@ impl<'a> TryFrom<&'a Attr<'a>> for Vec<AtomicStatement> {
 }
 
 impl<'a> TryFrom<&'a TypeTransition<'a>> for Vec<AtomicStatement> {
+    /// 展开失败时返回的错误类型。
     type Error = anyhow::Error;
+    /// 生成一条五参数转换命令；可选对象名缺省时编码为 `PolicyObject::None`。
     fn try_from(perm: &'a TypeTransition<'a>) -> Result<Self> {
         let mut result = vec![];
+        // 对象名可选；缺省时该槽保持为空，由内核按“不限定对象名”处理。
         let obj = match perm.object_name {
             Some(obj) => obj.try_into()?,
             None => PolicyObject::None,
@@ -633,9 +742,12 @@ impl<'a> TryFrom<&'a TypeTransition<'a>> for Vec<AtomicStatement> {
 }
 
 impl<'a> TryFrom<&'a TypeChange<'a>> for Vec<AtomicStatement> {
+    /// 展开失败时返回的错误类型。
     type Error = anyhow::Error;
+    /// 生成一条四参数命令，操作符决定 subcmd 是 change 还是 member。
     fn try_from(perm: &'a TypeChange<'a>) -> Result<Self> {
         let mut result = vec![];
+        // change 与 member 只有 subcmd 不同，其余参数布局一致。
         let subcmd = match perm.op {
             "type_change" => crate::ksu_uapi::KSU_SEPOLICY_SUBCMD_TYPE_CHANGE_CHANGE,
             "type_member" => crate::ksu_uapi::KSU_SEPOLICY_SUBCMD_TYPE_CHANGE_MEMBER,
@@ -657,8 +769,11 @@ impl<'a> TryFrom<&'a TypeChange<'a>> for Vec<AtomicStatement> {
 }
 
 impl<'a> TryFrom<&'a GenFsCon<'a>> for Vec<AtomicStatement> {
+    /// 展开失败时返回的错误类型。
     type Error = anyhow::Error;
+    /// 生成一条三参数命令：文件系统名、部分路径、SELinux context。
     fn try_from(perm: &'a GenFsCon<'a>) -> Result<Self> {
+        // 三个参数与内核 genfscon 命令一一对应，无需展开。
         let result = vec![AtomicStatement {
             cmd: crate::ksu_uapi::KSU_SEPOLICY_CMD_GENFSCON,
             subcmd: 0,
@@ -675,8 +790,13 @@ impl<'a> TryFrom<&'a GenFsCon<'a>> for Vec<AtomicStatement> {
 }
 
 impl<'a> TryFrom<&'a PolicyStatement<'a>> for Vec<AtomicStatement> {
+    /// 展开失败时返回的错误类型。
     type Error = anyhow::Error;
+    /// 按枚举变体分派到具体的展开实现。
+    ///
+    /// 这里用 `?` 传播参数编码错误，因此一条坏语句会让整批转换失败。
     fn try_from(value: &'a PolicyStatement) -> Result<Self> {
+        // 枚举变体与命令类别一一对应，逐类转换并保持语句原有顺序。
         match value {
             PolicyStatement::NormalPerm(perm) => perm.try_into(),
             PolicyStatement::XPerm(perm) => perm.try_into(),

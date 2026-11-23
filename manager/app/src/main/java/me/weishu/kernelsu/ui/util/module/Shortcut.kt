@@ -25,6 +25,12 @@ import me.weishu.kernelsu.ui.util.isColorOS
 import me.weishu.kernelsu.ui.util.isHyperOS
 import me.weishu.kernelsu.ui.util.isMiui
 
+/**
+ * 模块快捷方式的创建、查询与删除。
+ *
+ * 快捷方式通过自定义 `ksu://` URI 携带模块 id 与一次性 token，
+ * MainActivity 收到后需校验 token，避免其他应用伪造 Intent。
+ */
 object Shortcut {
 
     private const val TAG = "ModuleShortcut"
@@ -32,6 +38,7 @@ object Shortcut {
     const val HOST_ACTION = "action"
     const val HOST_WEBUI = "webui"
 
+    /** 构造快捷方式 URI：host 区分“执行 action”与“打开 WebUI”。 */
     fun buildShortcutUri(moduleId: String, type: ShortcutType): Uri {
         val host = when (type) {
             ShortcutType.Action -> HOST_ACTION
@@ -41,10 +48,12 @@ object Shortcut {
             .scheme(SCHEME_KSU)
             .authority(host)
             .appendQueryParameter("id", moduleId)
+            // 一次性 token 用于 MainActivity 验证来源，防止外部应用直接触发模块 action。
             .appendQueryParameter("token", SettingsRepositoryImpl().intentToken)
             .build()
     }
 
+    /** 创建“执行模块 action”的桌面快捷方式。 */
     fun createModuleActionShortcut(
         context: Context,
         moduleId: String,
@@ -68,6 +77,7 @@ object Shortcut {
         )
     }
 
+    /** 创建“直接打开模块 WebUI”的桌面快捷方式。 */
     fun createModuleWebUiShortcut(
         context: Context,
         moduleId: String,
@@ -91,6 +101,12 @@ object Shortcut {
         )
     }
 
+    /**
+     * 快捷方式创建的公共流程。
+     *
+     * 先尝试静默推送动态快捷方式，再请求固定到桌面；小米/OPPO 等 ROM
+     * 需要额外的 launcher 权限，失败时引导用户去设置页手动开启。
+     */
     private fun createModuleShortcut(
         context: Context,
         moduleId: String,
@@ -176,24 +192,35 @@ object Shortcut {
         }
     }
 
+    /** 查询模块 action 快捷方式是否已固定到桌面。 */
     fun hasModuleActionShortcut(context: Context, moduleId: String): Boolean {
         val id = "module_action_$moduleId"
         return hasPinnedShortcut(context, id)
     }
 
+    /** 查询模块 WebUI 快捷方式是否已固定到桌面。 */
     fun hasModuleWebUiShortcut(context: Context, moduleId: String): Boolean {
         val id = "module_webui_$moduleId"
         return hasPinnedShortcut(context, id)
     }
 
+    /** 删除模块 action 快捷方式（动态移除并禁用已固定的条目）。 */
     fun deleteModuleActionShortcut(context: Context, moduleId: String) {
         deleteShortcut(context, "module_action_$moduleId")
     }
 
+    /** 删除模块 WebUI 快捷方式。 */
     fun deleteModuleWebUiShortcut(context: Context, moduleId: String) {
         deleteShortcut(context, "module_webui_$moduleId")
     }
 
+    /**
+     * 加载快捷方式图标并裁剪为正方形。
+     *
+     * 支持 `su://` 前缀：模块图标可能位于仅 root 可读的目录，此时通过
+     * SuFile 读取；普通 content/file URI 走 ContentResolver。结果缩放到
+     * 不大于 512px，减少快捷方式存储开销。
+     */
     fun loadShortcutBitmap(context: Context, iconUri: String?): Bitmap? {
         if (iconUri.isNullOrBlank()) {
             return null
@@ -201,9 +228,11 @@ object Shortcut {
         return try {
             val uri = iconUri.toUri()
             Log.d(TAG, "loadShortcutBitmap: loading bitmap from uri=$uri")
+            // su:// 表示需要 root 权限读取的模块内部图标。
             val rawBitmap = if (uri.scheme.equals("su", ignoreCase = true)) {
                 val path = uri.path ?: ""
                 if (path.isNotBlank()) {
+                    // 在全局挂载命名空间中读取，才能访问模块挂载后的文件。
                     val shell = getRootShell(true)
                     val suFile = SuFile(path)
                     suFile.shell = shell
@@ -254,11 +283,13 @@ object Shortcut {
         }
     }
 
+    // 图标加载失败时返回 null，由调用方回退到应用默认图标。
     private fun createShortcutIcon(context: Context, iconUri: String?): IconCompat? {
         val bitmap = loadShortcutBitmap(context, iconUri) ?: return null
         return IconCompat.createWithBitmap(bitmap)
     }
 
+    // 仅匹配“已固定到桌面”的快捷方式；launcher 不支持时视为不存在。
     private fun hasPinnedShortcut(context: Context, id: String): Boolean {
         return try {
             val shortcuts = ShortcutManagerCompat.getShortcuts(
@@ -274,6 +305,7 @@ object Shortcut {
         }
     }
 
+    // 同时移除动态快捷方式并禁用固定的快捷方式，避免残留失效入口。
     private fun deleteShortcut(context: Context, id: String) {
         try {
             ShortcutManagerCompat.removeDynamicShortcuts(context, listOf(id))
@@ -289,6 +321,7 @@ object Shortcut {
         }
     }
 
+    // 各 ROM 对“创建快捷方式”权限的自定义状态。
     private enum class ShortcutPermissionState {
         Granted,
         Denied,
@@ -296,6 +329,12 @@ object Shortcut {
         Unknown
     }
 
+    /**
+     * 查询 MIUI/HyperOS 的快捷方式权限。
+     *
+     * 对应 AppOps op 10017，属于未公开 API，只能反射调用 checkOpNoThrow；
+     * 返回 0/1/5 分别映射为允许/拒绝/询问，其他值视为未知。
+     */
     private fun checkMiuiShortcutPermission(context: Context): ShortcutPermissionState {
         return try {
             val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
@@ -330,11 +369,18 @@ object Shortcut {
         }
     }
 
+    /**
+     * 查询 ColorOS 的快捷方式权限。
+     *
+     * 读取 ColorOS 私有的 secure settings，格式形如 `包名, 1` 或 `包名, 0`；
+     * 无法读取时返回 Unknown，由上层决定是否提示用户。
+     */
     private fun checkOppoShortcutPermission(context: Context): ShortcutPermissionState {
         val resolver = context.contentResolver ?: run {
             Log.w(TAG, "checkOppoShortcutPermission: contentResolver is null")
             return ShortcutPermissionState.Unknown
         }
+        // ColorOS 私有设置项，普通应用只能读取，不能直接修改。
         val uri = "content://settings/secure/launcher_shortcut_permission_settings".toUri()
         val cursor = resolver.query(uri, null, null, null, null) ?: run {
             Log.w(TAG, "checkOppoShortcutPermission: query returned null cursor, uri=$uri")
@@ -366,6 +412,7 @@ object Shortcut {
         return ShortcutPermissionState.Unknown
     }
 
+    // 用 root shell 直接放开 10017 权限；包名来自本应用，无需额外转义。
     private fun tryGrantMiuiShortcutPermissionByRoot(context: Context): Boolean {
         val pkg = context.applicationContext.packageName
         val cmd = "appops set $pkg 10017 allow"
@@ -380,6 +427,7 @@ object Shortcut {
         }
     }
 
+    // 按 ROM 类型选择权限检查实现；其他系统没有类似限制，返回 Unknown。
     private fun getShortcutPermissionState(context: Context): ShortcutPermissionState {
         return when {
             isMiui() || isHyperOS() -> checkMiuiShortcutPermission(context)
@@ -388,6 +436,7 @@ object Shortcut {
         }
     }
 
+    // 按 ROM 展示对应的开启指引；未授权时再跳转应用详情页方便手动设置。
     private fun showShortcutPermissionHint(context: Context) {
         val state = getShortcutPermissionState(context)
         val messageRes = when {
@@ -403,6 +452,7 @@ object Shortcut {
         }
     }
 
+    // 打开本应用的系统详情页；部分 ROM 未实现该 Action 时静默失败。
     private fun openAppDetailsSettings(context: Context) {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", context.packageName, null)

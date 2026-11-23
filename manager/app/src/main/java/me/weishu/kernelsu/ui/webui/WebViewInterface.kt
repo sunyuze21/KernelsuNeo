@@ -46,20 +46,33 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.concurrent.CompletableFuture
 
+/**
+ * 注入为 `ksu` 的 WebUI 主桥接对象。
+ *
+ * 提供的 shell/spawn 能力等价于 root 命令执行，因此只应注入到模块本地
+ * webroot 页面；命令与参数都直接来自 JS，没有额外的沙箱隔离。
+ */
 class WebViewInterface(private val state: WebUIState) {
     private val webView get() = state.webView
     private val modDir get() = state.modDir
 
+    /** 同步执行 shell 命令并返回 stdout；在全局挂载命名空间中运行。 */
     @JavascriptInterface
     fun exec(cmd: String): String {
         return withNewRootShell(true) { ShellUtils.fastCmd(this, cmd) }
     }
 
+    /** 异步执行命令，完成后调用 JS 回调函数。 */
     @JavascriptInterface
     fun exec(cmd: String, callbackFunc: String) {
         exec(cmd, null, callbackFunc)
     }
 
+    /**
+     * 把 options 中的 cwd/env 转成 shell 前缀。
+     *
+     * 直接字符串拼接，不做转义：这些参数本身来自受信任的模块 WebUI。
+     */
     private fun processOptions(sb: StringBuilder, options: String?) {
         val opts = if (options == null) JSONObject() else JSONObject(options)
 
@@ -75,6 +88,12 @@ class WebViewInterface(private val state: WebUIState) {
         }
     }
 
+    /**
+     * 执行命令并通过 javascript: URL 回调结果。
+     *
+     * 回调在主线程 post，stdout/stderr 用 JSONObject.quote 转义后嵌入 JS，
+     * 避免输出中的引号破坏脚本。
+     */
     @JavascriptInterface
     fun exec(
         cmd: String,
@@ -102,6 +121,11 @@ class WebViewInterface(private val state: WebUIState) {
         }
     }
 
+    /**
+     * 以流式方式执行命令，逐行 emit stdout/stderr，结束时 emit exit/error。
+     *
+     * 适用于长时间运行的脚本；使用独立 root shell，结束后关闭。
+     */
     @JavascriptInterface
     fun spawn(command: String, args: String, options: String?, callbackFunc: String) {
         val finalCommand = StringBuilder()
@@ -118,8 +142,10 @@ class WebViewInterface(private val state: WebUIState) {
             finalCommand.append(command)
         }
 
+        // 每次 spawn 使用独立 shell，便于结束后立即关闭。
         val shell = createRootShell(true)
 
+        // 把一行输出作为事件发送给 JS 回调对象。
         val emitData = fun(name: String, data: String) {
             val jsCode =
                 "javascript: (function() { try { ${callbackFunc}.${name}.emit('data', ${
@@ -133,12 +159,14 @@ class WebViewInterface(private val state: WebUIState) {
         }
 
         val stdout = object : CallbackList<String>(UiThreadHandler::runAndWait) {
+            // 每行 stdout 立即 emit，实现流式输出。
             override fun onAddElement(s: String) {
                 emitData("stdout", s)
             }
         }
 
         val stderr = object : CallbackList<String>(UiThreadHandler::runAndWait) {
+            // 每行 stderr 通过独立事件通道发送。
             override fun onAddElement(s: String) {
                 emitData("stderr", s)
             }
@@ -174,6 +202,7 @@ class WebViewInterface(private val state: WebUIState) {
         }
     }
 
+    /** 在宿主 Activity 上显示短 Toast。 */
     @JavascriptInterface
     fun toast(msg: String) {
         webView?.post {
@@ -181,6 +210,7 @@ class WebViewInterface(private val state: WebUIState) {
         }
     }
 
+    /** 切换全屏：隐藏/显示系统栏，并同步 insets 模式。 */
     @JavascriptInterface
     fun fullScreen(enable: Boolean) {
         val context = webView?.context
@@ -196,11 +226,13 @@ class WebViewInterface(private val state: WebUIState) {
         enableEdgeToEdge(enable)
     }
 
+    /** 由网页声明是否自行处理安全区；启用后 Compose 不再额外留白。 */
     @JavascriptInterface
     fun enableEdgeToEdge(enable: Boolean = true) {
         state.isInsetsEnabled = enable
     }
 
+    /** 返回当前模块的元信息 JSON（来自 `ksud module list`）。 */
     @JavascriptInterface
     fun moduleInfo(): String {
         val moduleInfos = JSONArray(listModules())
@@ -223,6 +255,9 @@ class WebViewInterface(private val state: WebUIState) {
         return currentModuleInfo.toString()
     }
 
+    /**
+     * 兼容旧 WebUI 的包名列表接口，新代码应使用 `ksu.pm()`。
+     */
     @Deprecated("Use ksu.pm().listPackages() instead")
     @JavascriptInterface
     fun listPackages(type: String): String {
@@ -246,6 +281,9 @@ class WebViewInterface(private val state: WebUIState) {
         return jsonArray.toString()
     }
 
+    /**
+     * 兼容旧 WebUI 的包信息查询接口，新代码应使用 `ksu.pm()`。
+     */
     @Deprecated("Use ksu.pm().getPackagesInfo() instead")
     @JavascriptInterface
     fun getPackagesInfo(packageNamesJson: String): String {
@@ -276,31 +314,46 @@ class WebViewInterface(private val state: WebUIState) {
         return jsonArray.toString()
     }
 
+    /** 请求关闭 WebUI 页面。 */
     @JavascriptInterface
     fun exit() {
         state.requestExit()
     }
 
+    /** 获取文件 IO 桥接对象（对应 `ksu.io()`）。 */
     @JavascriptInterface
     fun io() = KsuIO
 
+    /** 获取 PackageManager 桥接对象（对应 `ksu.pm()`）。 */
     @JavascriptInterface
     fun pm() = KsuPm
 
+    /** 页面销毁时释放所有文件句柄。 */
     fun destroy() {
         KsuIO.destroy()
     }
 }
 
+/**
+ * 注入为 `ksu_download` 的下载桥接对象。
+ *
+ * 支持两类下载：一次性 Base64 保存（save）与分块 blob 下载
+ * （startChunkedDownload/writeDownloadChunk/completeChunkedDownload）。
+ * 写入统一通过 MediaStore，避免申请存储权限。
+ */
 class WebUIDownloadInterface(private val state: WebUIState) {
+    // 下载落盘在 IO 线程执行，页面销毁时统一取消。
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val webView get() = state.webView
 
+    // 下载通知相关常量。
     companion object {
         // Use a different notification ID range to avoid collision with DownloadService
+        // 从 200000 起编号，避开 DownloadService 的 100000 段。
         private const val WEBUI_NOTIFICATION_ID_BASE = 200000
     }
 
+    /** 用系统浏览器打开外部链接；仅允许 http/https，防止任意 scheme 调起。 */
     @JavascriptInterface
     fun openExternal(url: String) {
         val currentWebView = webView ?: return
@@ -314,10 +367,16 @@ class WebUIDownloadInterface(private val state: WebUIState) {
         }
     }
 
+    /**
+     * 保存一段 Base64 数据到系统下载目录。
+     *
+     * 数据一次性解码到内存，适合小文件；大文件应使用分块接口。
+     */
     @JavascriptInterface
     fun save(base64: String, fileName: String?) {
         val currentWebView = webView ?: return
         val context = currentWebView.context
+        // 文件名先清洗，防止路径穿越；MIME 由扩展名推断。
         val displayName = sanitizeWebUIDownloadFileName(fileName)
         val mimeType = resolveDownloadMimeType(displayName, null)
         val notificationManager = context.getSystemService(NotificationManager::class.java)
@@ -332,8 +391,10 @@ class WebUIDownloadInterface(private val state: WebUIState) {
         scope.launch {
             var pendingUri: Uri? = null
             val savedUri = try {
+                // DEFAULT 兼容带换行的 Base64；数据整体在内存中。
                 val decoded = Base64.decode(base64, Base64.DEFAULT)
                 val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                // IS_PENDING=1 先占位，写完后再发布，避免出现半截文件。
                 val values = android.content.ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
                     put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
@@ -392,6 +453,11 @@ class WebUIDownloadInterface(private val state: WebUIState) {
         }
     }
 
+    /**
+     * 开始分块下载，返回内部下载 id（用于后续 write/complete）。
+     *
+     * 临时文件放在 cacheDir，fileName 同样会做安全清洗。
+     */
     @JavascriptInterface
     fun startChunkedDownload(fileName: String?, mimeType: String?): String {
         val currentWebView = webView ?: return ""
@@ -408,26 +474,31 @@ class WebUIDownloadInterface(private val state: WebUIState) {
         }
     }
 
+    /** 写入一个 Base64 分块；失败会清理对应会话。 */
     @JavascriptInterface
     fun writeDownloadChunk(downloadId: String, base64Chunk: String): Boolean {
         return BlobDownloadHandler.writeChunk(downloadId, base64Chunk)
     }
 
+    /** 完成分块下载，使临时文件可被 WebView 下载拦截器读取。 */
     @JavascriptInterface
     fun completeChunkedDownload(downloadId: String): Boolean {
         return BlobDownloadHandler.completeDownload(downloadId)
     }
 
+    /** 取消分块下载并删除临时文件。 */
     @JavascriptInterface
     fun cancelChunkedDownload(downloadId: String) {
         BlobDownloadHandler.cancelDownload(downloadId)
     }
 
+    // 页面销毁时取消协程并清理所有分块下载临时文件。
     fun destroy() {
         scope.cancel()
         BlobDownloadHandler.cleanup()
     }
 
+    // 在 WebView 所在线程显示 Toast。
     private fun postToast(message: String) {
         webView?.let { currentWebView ->
             currentWebView.post {
@@ -436,6 +507,7 @@ class WebUIDownloadInterface(private val state: WebUIState) {
         }
     }
 
+    // 确保下载通知渠道已创建；复用 DownloadService 的渠道，保持设置入口一致。
     private fun ensureNotificationChannel(notificationManager: NotificationManager, context: Context) {
         notificationManager.createNotificationChannel(
             NotificationChannel(
@@ -446,6 +518,7 @@ class WebUIDownloadInterface(private val state: WebUIState) {
         )
     }
 
+    // 构建 WebUI 下载的进行中通知。
     private fun buildProgressNotification(
         context: Context,
         fileName: String,
@@ -459,6 +532,11 @@ class WebUIDownloadInterface(private val state: WebUIState) {
         .setSilent(true)
         .build()
 
+    /**
+     * 构建完成通知；点击后用 ACTION_VIEW 打开刚保存的 MediaStore URI。
+     *
+     * 需要授予临时读权限，否则接收方应用无法读取。
+     */
     private fun buildCompletionNotification(
         context: Context,
         downloadId: Int,
@@ -491,6 +569,7 @@ class WebUIDownloadInterface(private val state: WebUIState) {
             .build()
     }
 
+    // 构建下载失败通知。
     private fun buildFailureNotification(
         context: Context,
         fileName: String,
@@ -502,11 +581,13 @@ class WebUIDownloadInterface(private val state: WebUIState) {
         .build()
 }
 
+/** 隐藏系统栏进入全屏；滑动边缘可临时唤出。 */
 fun hideSystemUI(window: Window) =
     WindowInsetsControllerCompat(window, window.decorView).let { controller ->
         controller.hide(WindowInsetsCompat.Type.systemBars())
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
+/** 退出全屏，恢复系统栏显示。 */
 fun showSystemUI(window: Window) =
     WindowInsetsControllerCompat(window, window.decorView).show(WindowInsetsCompat.Type.systemBars())

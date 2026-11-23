@@ -34,6 +34,8 @@ use regex_lite::Regex;
 use crate::assets;
 use crate::feature_id::{FeatureId, parse_feature_id};
 
+/// 仅在 Android 设备上编译的辅助函数集合：内核版本与 KMI 探测、原厂镜像备份、
+/// 分区选择、块设备刷写以及 OTA 槽位切换。
 #[cfg(target_os = "android")]
 mod android {
     use super::Result;
@@ -263,6 +265,7 @@ mod android {
         // （0x12 表示块设备子系统，93 即 BLKROSET）。传入 0 表示清除只读标志。
         // 这里必须用 unsafe：ioctl 接收裸 fd 和指针，`val` 在调用期间保持存活。
         unsafe {
+            // 块设备只读标志的 ioctl 命令号；0 表示清除只读标志。
             const BLKROSET: i32 = libc::_IO(0x12, 93);
             let mut val: libc::c_int = 0;
             if libc::ioctl(blk.as_raw_fd(), BLKROSET, &raw mut val) != 0 {
@@ -915,14 +918,14 @@ pub fn patch(args: BootPatchArgs) -> Result<()> {
             {
                 println!("- KMI: {kmi}");
                 let name = format!("{kmi}_kernelsu.ko");
-                assets::get_asset(&name).with_context(|| format!("Failed to load {name}"))?
+                assets::get_asset_boxed(&name).with_context(|| format!("Failed to load {name}"))?
             }
             #[cfg(not(target_os = "android"))]
             {
                 println!("- KMI: {kmi}");
                 println!("- Arch: {arch}");
                 let name = format!("{arch}/{kmi}_kernelsu.ko");
-                assets::get_asset(&name).with_context(|| format!("Failed to load {name}"))?
+                assets::get_asset_boxed(&name).with_context(|| format!("Failed to load {name}"))?
             }
         };
 
@@ -935,11 +938,12 @@ pub fn patch(args: BootPatchArgs) -> Result<()> {
         } else {
             #[cfg(not(target_os = "android"))]
             {
-                assets::get_asset(&format!("{arch}/ksuinit")).context("Failed to load ksuinit")?
+                assets::get_asset_boxed(&format!("{arch}/ksuinit"))
+                    .context("Failed to load ksuinit")?
             }
             #[cfg(target_os = "android")]
             {
-                assets::get_asset("ksuinit").context("Failed to load ksuinit")?
+                assets::get_asset_boxed("ksuinit").context("Failed to load ksuinit")?
             }
         };
 
@@ -1327,10 +1331,12 @@ fn rebuild_without_ksu(
     Ok(buf.into_inner())
 }
 
+/// `--block-module` 名称校验与 `ksu_config` 写入逻辑的单元测试。
 #[cfg(test)]
 mod block_modules_tests {
     use super::*;
 
+    /// 合法模块名（字母、数字、下划线）应被原样接受。
     #[test]
     fn parse_block_module_accepts_valid_names() {
         assert_eq!(
@@ -1341,6 +1347,7 @@ mod block_modules_tests {
         assert_eq!(parse_block_module("mkp0").unwrap(), "mkp0");
     }
 
+    /// 空名、含连字符/空格以及超过 64 字节的名称都必须被拒绝。
     #[test]
     fn parse_block_module_rejects_invalid_names() {
         assert!(parse_block_module("").is_err());
@@ -1349,6 +1356,7 @@ mod block_modules_tests {
         assert!(parse_block_module(&"a".repeat(65)).is_err());
     }
 
+    /// 指定模块时写入 `block_modules=`，省略该选项时删除旧条目，且不动其他配置项。
     #[test]
     fn apply_writes_and_clears_block_modules() {
         let args = KsuConfigArgs {
@@ -1367,6 +1375,7 @@ mod block_modules_tests {
         assert!(!config.iter().any(|v| v.starts_with("block_modules=")));
     }
 
+    /// 重复修补时旧的 `block_modules=` 必须被整体替换，而不是追加多份。
     #[test]
     fn apply_replaces_existing_block_modules() {
         let args = KsuConfigArgs {
@@ -1385,6 +1394,7 @@ mod block_modules_tests {
         assert!(config.contains(&"block_modules=vr".to_owned()));
     }
 
+    /// 前缀相似但键名不同的条目（如 `block_modules_foo=`）不能被误删。
     #[test]
     fn apply_keeps_sibling_keys_with_shared_prefix() {
         // 仅以 "block_modules" 开头、但并非精确的 "block_modules=" 条目的键，
@@ -1399,6 +1409,7 @@ mod block_modules_tests {
         assert!(config.contains(&"block_modules=vr".to_owned()));
     }
 
+    /// 拼接后超过内核 255 字节缓冲区的列表必须在主机端就报错，避免被静默截断。
     #[test]
     fn validate_rejects_overlong_list() {
         // 许多合法名称拼接后的长度会超过内核 255 字节的值预算，

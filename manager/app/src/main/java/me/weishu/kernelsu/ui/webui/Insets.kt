@@ -13,6 +13,9 @@ package me.weishu.kernelsu.ui.webui
  * @property bottom The bottom inset value in pixels.
  * @property left The left inset value in pixels.
  * @property right The right inset value in pixels.
+ *
+ * 说明：单位为 px，注入时直接写 CSS 变量；同时兼容 Framework7 的
+ * --f7-safe-area-* 变量，方便不同 WebUI 框架复用。
  */
 data class Insets(
     val top: Int,
@@ -20,6 +23,7 @@ data class Insets(
     val left: Int,
     val right: Int,
 ) {
+    // 生成 :root CSS 变量，页面加载后注入即可生效。
     val css
         get() = buildString {
             appendLine(":root {")
@@ -37,6 +41,7 @@ data class Insets(
             appendLine("\t--f7-safe-area-right: var(--window-inset-right, 0px) !important;")
             append("}")
         }
+    // 运行时更新 CSS 变量的 JS 片段，用于旋转/分屏后即时调整。
     val js
         get() = buildString {
             append("(function() {")

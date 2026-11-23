@@ -48,6 +48,9 @@ pub fn grant_root(global_mnt: bool) -> Result<()> {
     Err(command.exec().into())
 }
 
+/// 打印 `su` 用法摘要。
+///
+/// 直接写到标准输出，不返回错误；供 `-h`/参数解析失败时使用。
 fn print_usage(program: &str, opts: &Options) {
     let brief = format!("KernelSU\n\nUsage: {program} [options] [-] [user [argument...]]");
     print!("{}", opts.usage(&brief));
@@ -86,6 +89,11 @@ fn resolve_uid(user: &str) -> Result<u32> {
         .map_err(|_| anyhow::anyhow!("Unknown user: {user}"))
 }
 
+/// 把当前线程的 SELinux 标签切换到 `context`。
+///
+/// 通过写入 `/proc/thread-self/attr/current` 实现，只影响本线程；调用者必须
+/// 已有切换目标域的权限（通常是 root 域），否则内核返回 EACCES/EPERM。
+/// 切换发生在 exec 之前，因此目标 shell 会继承该标签。
 fn set_selinux_context(context: &str) -> Result<()> {
     std::fs::write("/proc/thread-self/attr/current", context)?;
     Ok(())

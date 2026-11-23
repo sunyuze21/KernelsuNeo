@@ -16,6 +16,13 @@ import me.weishu.kernelsu.ui.navigation3.LocalNavigator
 import me.weishu.kernelsu.ui.theme.ColorMode
 import me.weishu.kernelsu.ui.viewmodel.SettingsViewModel
 
+/**
+ * 颜色与主题设置页的入口。
+ *
+ * 负责把设置项（持久化在 [SettingsViewModel] 中）翻译成界面状态 [ColorPaletteUiState]，
+ * 并把所有写操作收敛到 [ColorPaletteScreenActions]，从而让 Material/Miuix 两套实现
+ * 共享同一份状态与回调，避免两端逻辑漂移。
+ */
 @Composable
 fun ColorPaletteScreen() {
     val navigator = LocalNavigator.current
@@ -23,6 +30,8 @@ fun ColorPaletteScreen() {
     val activity = LocalActivity.current
     val viewModel = viewModel<SettingsViewModel>()
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    // 数据库/偏好里可能残留旧版本写入的非法枚举名，解析失败时回退到默认风格，
+    // 不能让异常冒泡导致整个设置页崩溃。
     val currentPaletteStyle = try {
         PaletteStyle.valueOf(uiState.colorStyle)
     } catch (_: Exception) {
@@ -31,6 +40,7 @@ fun ColorPaletteScreen() {
     val currentColorSpec = try {
         ColorSpec.SpecVersion.valueOf(uiState.colorSpec)
     } catch (_: Exception) {
+        // 与 palette style 同理，保证 ColorSpec 始终可渲染。
         ColorSpec.SpecVersion.SPEC_2025
     }
     val state = ColorPaletteUiState(
@@ -52,6 +62,8 @@ fun ColorPaletteScreen() {
         onSetEnableFloatingBottomBarBlur = viewModel::setEnableFloatingBottomBarBlur,
         onSetEnableNavigationBadge = viewModel::setEnableNavigationBadge,
         onSetEnablePredictiveBack = {
+            // 预测性返回开关需要同步到 Activity 级别的 onBackInvokedCallback，
+            // 因此先落库，再重建 Activity 让新配置生效。
             viewModel.setEnablePredictiveBack(it)
             KernelSUApplication.setEnableOnBackInvokedCallback(context.applicationInfo, it)
             activity?.recreate()
@@ -62,6 +74,7 @@ fun ColorPaletteScreen() {
         onSetModuleDescriptionMaxLines = viewModel::setModuleDescriptionMaxLines,
     )
 
+    // 同一份 state/actions 分派给两套 UI 实现，切换模式时无需重复构建状态。
     when (LocalUiMode.current) {
         UiMode.Miuix -> ColorPaletteScreenMiuix(state, actions)
         UiMode.Material -> ColorPaletteScreenMaterial(state, actions)

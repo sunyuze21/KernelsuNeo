@@ -15,6 +15,13 @@ import top.yukonga.miuix.kmp.basic.DropdownDefaults
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
+/**
+ * 下拉菜单中的单个选项。
+ *
+ * 首项/末项额外加大上下留白，让圆角容器内的文字不贴边；中间项保持 12.dp，
+ * 使条目密度稳定。回调通过 `rememberUpdatedState` 读取最新 lambda，
+ * 避免菜单长驻时捕获到过期的选中逻辑。
+ */
 @Composable
 fun DropdownItem(
     modifier: Modifier = Modifier,
@@ -25,6 +32,7 @@ fun DropdownItem(
     onSelectedIndexChange: (Int) -> Unit
 ) {
     val currentOnSelectedIndexChange = rememberUpdatedState(onSelectedIndexChange)
+    // 首尾项补足留白，避免文字紧贴菜单容器的圆角边缘
     val additionalTopPadding = if (index == 0) 20f.dp else 12f.dp
     val additionalBottomPadding = if (index == optionSize - 1) 20f.dp else 12f.dp
 

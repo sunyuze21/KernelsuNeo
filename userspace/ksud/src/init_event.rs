@@ -6,11 +6,7 @@
 //! 重建 preinit 状态、加载 sepolicy/特性，并执行 metamodule 钩子。
 
 use crate::module::{ScriptWait, handle_updated_modules, prune_modules};
-use crate::utils::is_safe_mode;
-use crate::{
-    assets, defs, ksucalls, metamodule, restorecon,
-    utils::{self},
-};
+use crate::{assets, defs, ksucalls, metamodule, restorecon, utils};
 use anyhow::{Context, Result};
 use log::{error, info, warn};
 use std::{path::Path, time::Instant};
@@ -48,8 +44,10 @@ pub fn on_post_fs_data() -> Result<()> {
         return Ok(());
     }
 
+    // 安全模式标记在本次启动内不变，后续多个分支都依赖它决定是否跳过脚本。
     let safe_mode = crate::utils::is_safe_mode();
-    let wait = ScriptWait::Until(Instant::now() + defs::BOOT_STAGE_TIMEOUT);
+    // 每个阶段的所有脚本共享同一个截止时间，避免脚本串行时无限拖慢启动。
+    let stage_wait = ScriptWait::Until(Instant::now() + defs::BOOT_STAGE_TIMEOUT);
 
     if safe_mode {
         // 安全模式下仍保留模块目录：用户需要靠它们禁用/删除导致 boot loop
@@ -57,7 +55,7 @@ pub fn on_post_fs_data() -> Result<()> {
         warn!("safe mode, skip common post-fs-data.d scripts");
     } else {
         // 公共脚本（/data/adb/post-fs-data.d）先于各模块脚本执行。
-        if let Err(e) = crate::module::exec_common_scripts("post-fs-data.d", wait) {
+        if let Err(e) = crate::module::exec_common_scripts("post-fs-data.d", stage_wait) {
             warn!("exec common post-fs-data scripts failed: {e}");
         }
     }
@@ -116,19 +114,19 @@ pub fn on_post_fs_data() -> Result<()> {
     crate::feature::init_forced_features();
 
     // 加载特性配置
-    if is_safe_mode() {
+    if safe_mode {
         warn!("safe mode, skip load feature config");
     } else if let Err(e) = crate::feature::init_features() {
         warn!("init features failed: {e}");
     }
 
     // 优先执行元模块的 post-fs-data 脚本
-    if let Err(e) = metamodule::exec_stage_script("post-fs-data", wait) {
+    if let Err(e) = metamodule::exec_stage_script("post-fs-data", stage_wait) {
         warn!("exec metamodule post-fs-data script failed: {e}");
     }
 
     // 执行各模块的 post-fs-data 脚本
-    if let Err(e) = crate::module::exec_stage_script("post-fs-data", wait) {
+    if let Err(e) = crate::module::exec_stage_script("post-fs-data", stage_wait) {
         warn!("exec post-fs-data scripts failed: {e}");
     }
 
@@ -142,7 +140,7 @@ pub fn on_post_fs_data() -> Result<()> {
         warn!("execute metamodule mount failed: {e}");
     }
 
-    run_stage("post-mount", wait);
+    run_stage("post-mount", stage_wait);
 
     std::env::set_current_dir("/").with_context(|| "failed to chdir to /")?;
 
@@ -151,7 +149,7 @@ pub fn on_post_fs_data() -> Result<()> {
 
 /// 执行某一启动阶段的公共脚本（`/data/adb/<stage>.d`）、metamodule 脚本和
 /// 各模块脚本。metamodule 先执行，以便为普通模块准备好挂载基础。
-pub fn run_stage(stage: &str, wait: ScriptWait) {
+pub fn run_stage(stage: &str, stage_wait: ScriptWait) {
     utils::umask(0);
 
     if utils::has_magisk() {
@@ -164,17 +162,17 @@ pub fn run_stage(stage: &str, wait: ScriptWait) {
         return;
     }
 
-    if let Err(e) = crate::module::exec_common_scripts(&format!("{stage}.d"), wait) {
+    if let Err(e) = crate::module::exec_common_scripts(&format!("{stage}.d"), stage_wait) {
         warn!("Failed to exec common {stage} scripts: {e}");
     }
 
     // 优先执行元模块的阶段脚本
-    if let Err(e) = metamodule::exec_stage_script(stage, wait) {
+    if let Err(e) = metamodule::exec_stage_script(stage, stage_wait) {
         warn!("Failed to exec metamodule {stage} script: {e}");
     }
 
     // 执行普通模块的阶段脚本
-    if let Err(e) = crate::module::exec_stage_script(stage, wait) {
+    if let Err(e) = crate::module::exec_stage_script(stage, stage_wait) {
         warn!("Failed to exec {stage} scripts: {e}");
     }
 }
@@ -225,24 +223,25 @@ pub fn on_boot_completed() {
 ///
 /// 子进程被放入独立的进程组并归入 ksud 的 cgroup，避免拖住启动阶段；
 /// 同时由 `timeout` 限制运行时长。
-fn catch_bootlog(logname: &str, command: &[&str]) -> Result<()> {
+fn catch_bootlog(log_name: &str, command: &[&str]) -> Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
-    let logdir = Path::new(defs::LOG_DIR);
-    utils::ensure_dir_exists(logdir)?;
-    let bootlog = logdir.join(format!("{logname}.log"));
-    let oldbootlog = logdir.join(format!("{logname}.old.log"));
+    let log_dir = Path::new(defs::LOG_DIR);
+    utils::ensure_dir_exists(log_dir)?;
+    // 本轮日志与上一轮分开保存，便于对比“本次启动”与“上次启动”。
+    let bootlog_path = log_dir.join(format!("{log_name}.log"));
+    let previous_bootlog_path = log_dir.join(format!("{log_name}.old.log"));
 
-    if bootlog.exists() {
-        std::fs::rename(&bootlog, oldbootlog)?;
+    if bootlog_path.exists() {
+        std::fs::rename(&bootlog_path, previous_bootlog_path)?;
     }
 
-    let bootlog = std::fs::File::create(bootlog)?;
+    let bootlog = std::fs::File::create(bootlog_path)?;
 
     let mut args = vec!["-s", "9", defs::BOOTLOG_TIMEOUT];
     args.extend_from_slice(command);
-    // timeout -s 9 30s logcat > boot.log
+    // 由 timeout 在超时后向整个进程组发送 SIGKILL，避免日志进程常驻。
     let result = unsafe {
         std::process::Command::new("timeout")
             .process_group(0)

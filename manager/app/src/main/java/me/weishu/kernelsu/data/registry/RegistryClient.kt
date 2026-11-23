@@ -5,13 +5,16 @@ import java.io.IOException
 
 /** Fetches a document; throws [IOException] on network / HTTP errors. */
 fun interface RegistryFetcher {
+    /** 拉取完整文本文档；实现方不应缓存，缓存策略由 [RegistryClient] 决定。 */
     @Throws(IOException::class)
     fun fetch(url: String): String
 }
 
 /** Small key/value store for the last complete good copies. Keys are file-name safe. */
 interface RegistryCache {
+    /** 读取缓存；不存在时返回 null，内容损坏由上层解析时忽略。 */
     fun read(key: String): String?
+    /** 覆盖写入缓存；实现应保证并发写入不会产生半截文件。 */
     fun write(key: String, value: String)
 }
 
@@ -31,18 +34,23 @@ class RegistryClient(
     private val cache: RegistryCache,
     private val parser: RegistryParser = RegistryParser(),
 ) {
+    /** 规范化后的站点根 URL（保证以 '/' 结尾），所有相对路径都基于它。 */
     val baseUrl: String = RegistryUrls.normalizeBaseUrl(baseUrl)
 
+    /** 最近一次成功加载的完整 catalog；供列表与详情共享，避免重复请求。 */
     @Volatile
     private var current: RegistryCatalog? = null
+    /** 串行化网络加载与写缓存，防止 index/list 来自不同 build。 */
     private val lock = Any()
 
+    /** catalog 加载结果；[error] 非空表示网络失败并回退到了缓存。 */
     data class CatalogLoad(
         val catalog: RegistryCatalog,
         /** Non-null when the network copy could not be used and a cached copy was returned. */
         val error: Throwable? = null,
     )
 
+    /** 详情加载结果；[catalog] 可能已刷新，[fromCache] 表示详情来自磁盘缓存。 */
     data class DetailLoad(
         /** Catalog the detail belongs to; may be newer than the one the caller held. */
         val catalog: RegistryCatalog,
@@ -51,13 +59,17 @@ class RegistryClient(
         val error: Throwable? = null,
     )
 
+    /** README HTML 片段；仅包含已清洗的正文。 */
     data class Readme(val html: String)
 
+    /** 磁盘缓存格式：原始 index 与 modules 文本，读取时重新解析以校验一致性。 */
     @Serializable
     private data class CachedCatalog(val index: String, val modules: String)
 
+    /** 把文档相对路径解析成完整 URL；非法路径会抛 [RegistryFormatException]。 */
     fun resolve(path: String): String = RegistryUrls.resolve(baseUrl, path)
 
+    /** 返回内存中的 catalog（可能为 null），不会触发网络请求。 */
     fun currentCatalog(): RegistryCatalog? = current
 
     /** Reads index + list from the network, falling back to the last complete good copy. */
@@ -65,6 +77,7 @@ class RegistryClient(
         try {
             CatalogLoad(fetchCatalog())
         } catch (e: Exception) {
+            // 网络失败时优先用内存副本，其次用磁盘缓存；都没有就把异常抛给调用方。
             val fallback = current ?: readCachedCatalog()
             if (fallback != null) {
                 current = fallback
@@ -78,6 +91,10 @@ class RegistryClient(
     /** Returns the catalog in memory, or loads one (network, then cache). */
     fun catalog(): RegistryCatalog = current ?: loadCatalog().catalog
 
+    /**
+     * 读取 index 与 modules，只有 buildId 一致时才接受并写缓存。
+     * 不一致时重试一次，仍不一致则抛 [BuildMismatchException]。
+     */
     private fun fetchCatalog(): RegistryCatalog {
         var lastError: Exception? = null
         repeat(2) {
@@ -88,6 +105,7 @@ class RegistryClient(
             if (modules.buildId == index.buildId) {
                 val catalog = RegistryCatalog(index, modules.modules, fromCache = false)
                 current = catalog
+                // 缓存写入失败不影响本次加载结果。
                 runCatching {
                     cache.write(
                         CATALOG_KEY,
@@ -101,6 +119,7 @@ class RegistryClient(
         throw lastError!!
     }
 
+    /** 从磁盘缓存恢复 catalog；内容损坏或 build 不一致时返回 null。 */
     private fun readCachedCatalog(): RegistryCatalog? = runCatching {
         val text = cache.read(CATALOG_KEY) ?: return null
         val cached = RegistryParser.DEFAULT_JSON.decodeFromString(CachedCatalog.serializer(), text)
@@ -110,6 +129,7 @@ class RegistryClient(
         RegistryCatalog(index, modules.modules, fromCache = true)
     }.getOrNull()
 
+    /** 拉取并解析单个模块详情，同时确保详情 id 与索引中的 id 一致。 */
     private fun fetchDetail(summary: ApiModuleSummary): Pair<String, ApiModuleDetail> {
         val text = fetcher.fetch(resolve(summary.detail))
         val detail = parser.parseDetail(text)
@@ -175,6 +195,7 @@ class RegistryClient(
     /** Loads the README HTML, or null if the module has none. Falls back to a cached copy of the same build. */
     fun loadReadme(detail: ApiModuleDetail): Readme? {
         val path = detail.readme ?: return null
+        // 缓存 key 按模块 id 区分，内容前缀记录 buildId 以便失效。
         val key = "readme-${detail.id}"
         return try {
             val html = fetcher.fetch(resolve(path))
@@ -188,15 +209,18 @@ class RegistryClient(
         }
     }
 
+    /** 缓存详情原文；失败不影响调用方，下次仍会走网络。 */
     private fun writeDetail(id: String, text: String) {
         runCatching { cache.write("detail-$id", text) }
     }
 
+    /** 读取并解析缓存的详情；内容损坏时返回 null。 */
     private fun readCachedDetail(id: String): ApiModuleDetail? = runCatching {
         cache.read("detail-$id")?.let(parser::parseDetail)
     }.getOrNull()
 
     private companion object {
+        /** 完整 catalog 的缓存 key。 */
         const val CATALOG_KEY = "catalog"
     }
 }

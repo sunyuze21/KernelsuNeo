@@ -50,7 +50,7 @@ pub fn take_request(staged_dir: &Path) -> Option<Request> {
 
 /// 把运行脚本解析为相对于模块目录的路径。脚本不存在时会被跳过，
 /// 与元模块实现的行为一致。
-fn check_run_script(staged_dir: &Path, script: &str) -> Result<Option<PathBuf>> {
+fn resolve_run_script(staged_dir: &Path, script: &str) -> Result<Option<PathBuf>> {
     // 安装脚本通常写成 "./script.sh"，这里去掉前导 "./"，让两种写法都能解析。
     let mut components = Path::new(script).components().peekable();
     while components.next_if_eq(&Component::CurDir).is_some() {}
@@ -81,7 +81,11 @@ fn check_run_script(staged_dir: &Path, script: &str) -> Result<Option<PathBuf>> 
 /// 校验是否允许热安装，并解析请求的脚本路径。
 ///
 /// 该检查发生在移动任何目录之前，被拒绝的请求会保留暂存目录，让重启后的常规更新流程接手。
-fn check(module_id: &str, is_metamodule: bool, request: &Request) -> Result<Option<PathBuf>> {
+fn validate_request(
+    module_id: &str,
+    is_metamodule: bool,
+    request: &Request,
+) -> Result<Option<PathBuf>> {
     // 元模块自己决定挂载后端，运行中中途替换不受支持。
     if is_metamodule {
         bail!("metamodules are always applied at boot");
@@ -92,12 +96,12 @@ fn check(module_id: &str, is_metamodule: bool, request: &Request) -> Result<Opti
     let Some(script) = &request.run_script else {
         return Ok(None);
     };
-    check_run_script(&Path::new(defs::MODULE_UPDATE_DIR).join(module_id), script)
+    resolve_run_script(&Path::new(defs::MODULE_UPDATE_DIR).join(module_id), script)
 }
 
 /// 把正在使用的模块目录移开。运行中的进程和已有的挂载可能仍然引用它，
 /// 因此只在下一次开机时才删除。
-fn stash(live_dir: &Path, module_id: &str) -> Result<PathBuf> {
+fn move_to_trash(live_dir: &Path, module_id: &str) -> Result<PathBuf> {
     ensure_dir_exists(defs::HOT_INSTALL_TRASH_DIR)?;
     // 纳秒时间戳避免同一模块连续热安装时目标目录重名。
     let nanos = SystemTime::now()
@@ -112,12 +116,14 @@ fn stash(live_dir: &Path, module_id: &str) -> Result<PathBuf> {
 /// 用暂存目录替换正在使用的模块目录，旧目录移入回收站。
 ///
 /// 如果暂存目录无法移入，就恢复旧目录，保证待处理的更新仍能在下次开机时正常应用。
-fn swap(module_id: &str) -> Result<()> {
+fn replace_live_module(module_id: &str) -> Result<()> {
+    // 暂存目录：安装器刚写完、等待替换到正式位置的内容。
     let staged_dir = Path::new(defs::MODULE_UPDATE_DIR).join(module_id);
+    // 活动目录：当前系统可能仍在引用的版本，替换时先移入回收站。
     let live_dir = Path::new(defs::MODULE_DIR).join(module_id);
 
     let stashed = if live_dir.exists() {
-        Some(stash(&live_dir, module_id)?)
+        Some(move_to_trash(&live_dir, module_id)?)
     } else {
         None
     };
@@ -140,8 +146,8 @@ fn swap(module_id: &str) -> Result<()> {
 pub fn apply(module_id: &str, is_metamodule: bool, request: &Request) -> bool {
     println!("- Hot install requested");
 
-    let run_script = match check(module_id, is_metamodule, request)
-        .and_then(|script| swap(module_id).map(|()| script))
+    let run_script = match validate_request(module_id, is_metamodule, request)
+        .and_then(|script| replace_live_module(module_id).map(|()| script))
     {
         Ok(script) => script,
         Err(e) => {

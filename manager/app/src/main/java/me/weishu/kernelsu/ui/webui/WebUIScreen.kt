@@ -35,6 +35,12 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import me.weishu.kernelsu.ui.LocalUiMode
 import me.weishu.kernelsu.ui.UiMode
 
+/**
+ * 注册文件选择器结果回调。
+ *
+ * 支持多选（clipData）与单选；取消或失败传 null，交给 onFileChooserResult
+ * 回传给 WebView。
+ */
 @Composable
 fun rememberFileLauncher(webUIState: WebUIState): ActivityResultLauncher<Intent> {
     return rememberLauncherForActivityResult(
@@ -51,16 +57,25 @@ fun rememberFileLauncher(webUIState: WebUIState): ActivityResultLauncher<Intent>
     }
 }
 
+/**
+ * WebUI 的 Compose 容器：托管 WebView、返回键、安全区与对话框。
+ *
+ * WebUI 可选择自行处理 insets（通过 internal/insets.css），此时 Compose
+ * 只让出 IME 空间，避免重复留白。
+ */
 @Composable
 fun WebUIScreen(webUIState: WebUIState) {
     val density = LocalDensity.current
     val layoutDirection = LocalLayoutDirection.current
+    // 应用自身绘制区域（状态栏/导航栏/刘海）。
     val drawingInsets = WindowInsets.safeDrawing
+    // 需要传给网页的设备 insets（系统栏 + 刘海）。
     val deviceInsets = WindowInsets.systemBars.union(WindowInsets.displayCutout)
     val imeInsets = WindowInsets.ime
     val innerPadding = if (webUIState.isInsetsEnabled) imeInsets.asPaddingValues() else drawingInsets.asPaddingValues()
     val fileLauncher = rememberFileLauncher(webUIState)
 
+    // insets 变化时通过 JS 更新 CSS 变量；仅在网页要求启用时执行。
     LaunchedEffect(density, layoutDirection, deviceInsets, webUIState.isInsetsEnabled) {
         if (!webUIState.isInsetsEnabled) {
             return@LaunchedEffect
@@ -80,6 +95,7 @@ fun WebUIScreen(webUIState: WebUIState) {
         }
     }
 
+    // 网页可后退时优先交给 WebView，避免直接退出页面。
     BackHandler(enabled = webUIState.webCanGoBack) {
         webUIState.webView?.goBack()
     }
@@ -98,12 +114,14 @@ fun WebUIScreen(webUIState: WebUIState) {
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                         )
                         if (!webUIState.isUrlLoaded) {
+                            // 通过虚拟域名加载 webroot，由 SuFilePathHandler 以 root 提供文件。
                             val homePage = "https://mui.kernelsu.org/index.html"
                             if (width > 0 && height > 0) {
                                 loadUrl(homePage)
                                 webUIState.isUrlLoaded = true
                             } else {
                                 val listener = object : View.OnLayoutChangeListener {
+                                    // 等到 WebView 有实际尺寸后再加载，避免首帧白屏/布局错乱。
                                     override fun onLayoutChange(
                                         v: View, left: Int, top: Int, right: Int, bottom: Int,
                                         oldLeft: Int, oldTop: Int, oldRight: Int, oldBottom: Int
@@ -136,6 +154,7 @@ fun WebUIScreen(webUIState: WebUIState) {
     HandleConfigurationChanges(webUIState)
 }
 
+// 将宿主的生命周期转发给 WebView，暂停/恢复 JS 定时器与媒体播放。
 @Composable
 private fun HandleWebViewLifecycle(webUIState: WebUIState) {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -156,6 +175,7 @@ private fun HandleWebViewLifecycle(webUIState: WebUIState) {
     }
 }
 
+// 字体缩放变化时同步 WebView 的 textZoom，保持与系统设置一致。
 @Composable
 private fun HandleConfigurationChanges(webUIState: WebUIState) {
     val configuration = LocalConfiguration.current

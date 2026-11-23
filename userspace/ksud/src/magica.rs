@@ -73,6 +73,7 @@ fn enable_adb_root(port: u16) -> Result<()> {
     let props_serial = "/dev/__properties__/properties_serial";
     let debuggable_context = format!("/dev/__properties__/{debuggable_context}");
     let adb_secure_context = format!("/dev/__properties__/{adb_secure_context}");
+    // adb TCP 端口既写进 service.adb.tcp.port，也用于随后连接本机 adbd。
     let port_str = port.to_string();
 
     // 把属性文件 chmod 为可写
@@ -152,6 +153,7 @@ pub fn disable_adb_root() -> Result<()> {
 ///
 /// adbd 退出再以 root 身份启动需要一点时间，因此这里最多重试约 30 秒再放弃 Magica 路径。
 fn connect_to_device(port: u16) -> Result<ADBTcpDevice> {
+    /// adbd 重启的轮询次数，配合 1s 间隔约为 30 秒上限。
     const MAX_RETRIES: u32 = 30;
     for attempt in 1..=MAX_RETRIES {
         info!("Waiting for adbd to restart... (attempt {attempt}/{MAX_RETRIES})");
@@ -173,7 +175,7 @@ fn connect_to_device(port: u16) -> Result<ADBTcpDevice> {
 ///
 /// 打开 adb root 后通过 ADB shell 驱动真正的加载；shell 失败只作为提示信息，因为派生的
 /// late-load 守护进程会脱离会话，即使加载成功，shell 连接也常常提前断开。
-pub fn run(port: u16, package_name: &String, allow_shell: bool) -> Result<()> {
+pub fn run_via_adb_root(port: u16, package_name: &str, allow_shell: bool) -> Result<()> {
     enable_adb_root(port)?;
 
     let mut device = connect_to_device(port)?;

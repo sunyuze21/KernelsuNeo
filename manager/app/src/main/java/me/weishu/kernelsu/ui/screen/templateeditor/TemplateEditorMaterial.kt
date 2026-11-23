@@ -37,6 +37,13 @@ import me.weishu.kernelsu.ui.component.material.TopBarBackButton
 import me.weishu.kernelsu.ui.component.material.expressiveTopAppBarColors
 import me.weishu.kernelsu.ui.component.profile.RootProfileConfig
 
+/**
+ * 模板编辑器的 Material 实现。
+ *
+ * 顶栏按新建/只读/编辑三种模式切换标题与动作；表单字段通过
+ * [TemplateEditorListItem] 统一渲染，RootProfileConfig 负责 UID/GID 等
+ * 根权限配置。只读模式下所有输入与保存动作都应被禁用。
+ */
 @Composable
 fun TemplateEditorScreenMaterial(
     state: TemplateEditorUiState,
@@ -88,6 +95,7 @@ fun TemplateEditorScreenMaterial(
                     if (state.isCreation) {
                         add(
                             {
+                                // id 仅新建时可见，既有模板的 id 不允许修改。
                                 TemplateEditorListItem(
                                     label = stringResource(id = R.string.app_profile_template_id),
                                     value = state.template.id,
@@ -124,6 +132,7 @@ fun TemplateEditorScreenMaterial(
             )
 
             RootProfileConfig(
+                // fixedName 避免用户在此修改模板名，名称由上方字段统一维护。
                 fixedName = true,
                 enabled = !state.readOnly,
                 profile = toNativeProfile(state.template),
@@ -139,6 +148,7 @@ fun TemplateEditorScreenMaterial(
     }
 }
 
+/** 模板文本字段：可选多行、错误提示与只读状态，统一 Material 文本样式。 */
 @Composable
 private fun TemplateEditorListItem(
     label: String,
@@ -164,6 +174,7 @@ private fun TemplateEditorListItem(
     )
 }
 
+/** 顶栏：标题/副标题、返回，以及非只读时的删除与保存按钮。 */
 @Composable
 private fun TopBar(
     title: String,

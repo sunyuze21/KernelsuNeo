@@ -70,7 +70,7 @@ pub fn set_process_root(pid: i32) -> Result<()> {
 ## 编译
 
 ```bash
-./build-apk.sh --clean --kernel -k android15-6.6
+python3 scripts/build_apk.py --clean --kernel -k android15-6.6
 ```
 
 因为 UAPI 版本从 6 升到 7，`ksud`、Manager APK 和 `kernelsu.ko` 必须一起重新构建。

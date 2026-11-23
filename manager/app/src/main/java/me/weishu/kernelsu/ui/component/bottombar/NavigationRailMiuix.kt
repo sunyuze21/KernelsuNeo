@@ -15,6 +15,10 @@ import top.yukonga.miuix.kmp.basic.NavigationRailValue
 import top.yukonga.miuix.kmp.basic.rememberNavigationRailState
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
+/**
+ * Miuix 侧边导航栏。展开/收起状态持久化到 SettingsRepository，
+ * 这里监听 currentValue（动画结束后的稳定值）再落盘，避免动画过程中反复写设置。
+ */
 @Composable
 fun NavigationRailMiuix(
     navigationBadge: NavigationBadgeState,
@@ -25,10 +29,12 @@ fun NavigationRailMiuix(
 
     val mainState = LocalMainPagerState.current
 
+    // 复用底栏枚举，保证文案与图标一致
     val items = BottomBarDestination.entries.map { destination ->
         Pair(stringResource(destination.label), destination.icon)
     }
     val settingsRepo = remember { SettingsRepositoryImpl() }
+    // 用持久化值初始化，避免首帧展开状态跳变
     val state = rememberNavigationRailState(
         initialValue = if (settingsRepo.navigationRailExpanded) {
             NavigationRailValue.Expanded

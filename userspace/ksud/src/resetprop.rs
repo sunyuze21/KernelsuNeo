@@ -22,10 +22,12 @@ use std::time::Duration;
 /// “等待了但条件始终未满足”与真正的失败（退出码 1）不同。
 #[derive(Debug)]
 struct WaitTimeoutError {
+    /// 触发超时的属性名，仅用于错误文案。
     name: String,
 }
 
 impl fmt::Display for WaitTimeoutError {
+    /// 输出超时错误文案；调用方据错误类型而非文本映射退出码。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "timeout waiting for {}", self.name)
     }
@@ -46,6 +48,7 @@ impl std::error::Error for WaitTimeoutError {}
     after_help = "Arguments:\n  NAME   Property name.\n  VALUE  Property value (for set or wait-for-value)."
 )]
 #[allow(clippy::struct_excessive_bools)]
+/// 解析后的 `resetprop` 命令行参数。
 struct Args {
     /// 跳过 property_service（强制直接进行 mmap 操作）。
     #[arg(short = 'n', long = "skip-svc")]
@@ -91,6 +94,9 @@ struct Args {
     #[arg(long = "force")]
     force: bool,
 
+    /// 位置参数：属性名、context 名或 `NAME`，以及可选的值。
+    ///
+    /// 含义由模式决定，隐藏 help 以避免与子命令参数混淆。
     #[arg(
         allow_hyphen_values = true,
         trailing_var_arg = true,

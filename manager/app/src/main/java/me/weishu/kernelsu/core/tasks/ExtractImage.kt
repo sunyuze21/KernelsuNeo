@@ -12,15 +12,21 @@ import java.nio.file.StandardOpenOption
 import java.util.zip.Inflater
 import java.util.zip.InflaterInputStream
 
+/** 探测结果：[partitions] 为包内可提取的分区名，[kmi] 为解析出的内核 KMI（未知时为 null）。 */
 data class ProbeResult(
     val partitions: List<String>,
     val kmi: String?,
 )
 
+/**
+ * 从 OTA / 工厂镜像 / 原始 payload 中提取 boot 镜像。
+ * 所有输入都通过 [DataSourceChannel] 随机读取，避免整包下载；[outFile] 为最终输出路径。
+ */
 class ExtractImage(
     private val outFile: File,
     private val onConsole: (String) -> Unit,
 ) {
+    /** 识别 ZIP 类型（OTA 或工厂镜像）并提取 [target] 分区到 [outFile]。 */
     @Throws(IOException::class)
     fun consume(channel: DataSourceChannel, target: String) {
         ZipFile.builder()
@@ -31,6 +37,7 @@ class ExtractImage(
                 if (payload != null) {
                     onConsole("- Processing as OTA package")
 
+                    // OTA 元数据仅用于展示构建信息，不影响提取逻辑。
                     zipFile.getEntry("META-INF/com/android/metadata")?.let { entry ->
                         zipFile.getInputStream(entry).use {
                             val meta = it.bufferedReader().readText()
@@ -51,6 +58,7 @@ class ExtractImage(
             }
     }
 
+    /** 直接把输入当作未压缩的 payload.bin 处理。 */
     @Throws(IOException::class)
     fun consumePayload(channel: DataSourceChannel, target: String) {
         onConsole("- Processing as raw payload.bin")
@@ -62,6 +70,7 @@ class ExtractImage(
         )
     }
 
+    /** 从 OTA ZIP 的 payload.bin 中提取分区；payload 必须是 STORED，否则无法按偏移切片。 */
     @Throws(IOException::class)
     private fun extractFromOTAPackage(
         payload: ZipArchiveEntry,
@@ -72,6 +81,7 @@ class ExtractImage(
             throw IOException("payload.bin is compressed, expected STORED method")
         }
 
+        // 只把 payload 所在的字节区间包装成子通道，后续按 payload 偏移读取。
         channel.slice(payload.dataOffset, payload.size).use { payloadChannel ->
             Payload(payloadChannel).extract(
                 outFile,
@@ -82,6 +92,7 @@ class ExtractImage(
         }
     }
 
+    /** 处理 Google 工厂镜像：boot 镜像可能在根目录，也可能在嵌套的 image-*.zip 中。 */
     @Throws(IOException::class)
     private fun extractFromFactoryImage(
         zipFile: ZipFile,
@@ -94,6 +105,7 @@ class ExtractImage(
             return extractImageFile(zipFile, entry, channel)
         }
 
+        // 工厂镜像通常把各分区再打成一个 image-<build>.zip。
         val imageZipEntry = zipFile.entries.asSequence().find { entry ->
             val fileName = entry.name.substringAfterLast('/')
             fileName.startsWith("image-") && fileName.endsWith(".zip")
@@ -106,6 +118,7 @@ class ExtractImage(
         throw IOException("inner image ZIP not found in factory image package")
     }
 
+    /** 按目标分区名查找对应的 boot 镜像条目；未知分区名返回 null。 */
     private fun findBootImageEntry(zipFile: ZipFile, target: String): ZipArchiveEntry? {
         val imageName = BOOT_IMAGE_NAMES[target] ?: return null
         return zipFile.entries.asSequence().find {
@@ -113,6 +126,7 @@ class ExtractImage(
         }
     }
 
+    /** 在内层 image-*.zip 中查找并提取目标镜像；内层同样要求 STORED。 */
     @Throws(IOException::class)
     private fun extractFromInnerImageZip(
         entry: ZipArchiveEntry,
@@ -137,6 +151,10 @@ class ExtractImage(
         }
     }
 
+    /**
+     * 把 ZIP 中的镜像条目写到 [outFile]。
+     * STORED 走零拷贝 mmap；DEFLATED 走流式解压；其他压缩方式不支持。
+     */
     @Throws(IOException::class)
     private fun extractImageFile(
         zipFile: ZipFile,
@@ -156,6 +174,7 @@ class ExtractImage(
                     StandardOpenOption.READ,
                     StandardOpenOption.TRUNCATE_EXISTING
                 ).use { fileChannel ->
+                    // 直接映射目标文件，再让源通道写入，避免中转缓冲区。
                     val mapped = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, entry.size)
                     val sourceChannel = channel.slice(entry.dataOffset, entry.size)
                     sourceChannel.read(mapped)
@@ -179,12 +198,14 @@ class ExtractImage(
     }
 
     companion object {
+        /** 逻辑分区名到镜像文件名的映射；只有这些分区会被当作可安装目标。 */
         private val BOOT_IMAGE_NAMES = mapOf(
             "boot" to "boot.img",
             "init_boot" to "init_boot.img",
             "vendor_boot" to "vendor_boot.img",
         )
 
+        /** 探测普通 ZIP / OTA / 工厂镜像中的可用分区和 KMI（不下载完整内容）。 */
         @Throws(IOException::class)
         fun probe(
             channel: DataSourceChannel,
@@ -194,6 +215,7 @@ class ExtractImage(
             return probeEntries(channel, withKmi, onProgress)
         }
 
+        /** 探测原始 payload.bin 的分区列表与 KMI。 */
         @Throws(IOException::class)
         fun probePayload(
             channel: DataSourceChannel,
@@ -207,6 +229,7 @@ class ExtractImage(
             )
         }
 
+        /** 递归探测 ZIP 内容：payload.bin、根目录 boot 镜像或嵌套的 image-*.zip。 */
         @Throws(IOException::class)
         private fun probeEntries(
             channel: DataSourceChannel,
@@ -232,6 +255,7 @@ class ExtractImage(
                         }
                     }
 
+                    // 根目录直接放 boot.img 等镜像的工厂镜像布局。
                     val bootParts = BOOT_IMAGE_NAMES.entries
                         .filter { (_, imageName) ->
                             zipFile.entries.asSequence().any {
@@ -252,6 +276,7 @@ class ExtractImage(
                         return ProbeResult(bootParts, kmi)
                     }
 
+                    // 否则继续深入内层 image-*.zip。
                     val imageZip = zipFile.entries.asSequence().find { entry ->
                         val fileName = entry.name.substringAfterLast('/')
                         fileName.startsWith("image-") && fileName.endsWith(".zip")
@@ -270,6 +295,7 @@ class ExtractImage(
                 }
         }
 
+        /** 读取单个镜像条目的 KMI；仅支持未压缩或 deflate 的数据。 */
         private fun readBootImageKmi(zipFile: ZipFile, entry: ZipArchiveEntry): String? {
             if (entry.method != ZipMethod.STORED.code && entry.method != ZipMethod.DEFLATED.code) return null
             return zipFile.getInputStream(entry).use { input ->
@@ -277,10 +303,12 @@ class ExtractImage(
             }
         }
 
+        /** 只保留客户端认识、可安装的 boot 相关分区。 */
         private fun filterBootPartitions(names: List<String>): List<String> {
             return BOOT_IMAGE_NAMES.keys.filter { it in names }
         }
 
+        /** 用于解析 KMI 的镜像优先级列表，目前只有 boot.img 携带内核。 */
         private val KERNEL_IMAGE_NAMES = listOf("boot.img")
     }
 }

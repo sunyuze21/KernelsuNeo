@@ -21,6 +21,16 @@ import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.overlay.OverlayDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 
+/**
+ * 页面/全局缩放的输入对话框。
+ *
+ * 输入框只接受数字，空串允许存在（便于用户清空后重新输入）；确认时再次做
+ * 80~110 的钳制与兜底，防止非数字或越界值写回配置。`text` 以 `show` 为 key
+ * 重置，保证每次打开都回显当前实际缩放值而不是上次编辑残留。
+ *
+ * @param volumeState 读取当前缩放比例（0.8~1.1）
+ * @param onVolumeChange 确认后回写新的缩放比例
+ */
 @Composable
 fun ScaleDialog(
     show: Boolean,
@@ -34,6 +44,7 @@ fun ScaleDialog(
         summary = "80% - 110%",
         onDismissRequest = onDismissRequest,
         content = {
+            // 以 show 为 key：每次打开都从真实值重新生成文本，丢弃上次未提交的编辑
             var text by remember(show) {
                 mutableStateOf((volumeState() * 100).toInt().toString())
             }
@@ -69,6 +80,7 @@ fun ScaleDialog(
                 TextButton(
                     text = stringResource(android.R.string.ok),
                     onClick = {
+                        // 非法输入回退到当前值；范围钳制放在这里而非输入时，避免用户无法输入中间态
                         val parsed = text.toIntOrNull()
                         val clamped = parsed?.coerceIn(80, 110) ?: (volumeState() * 100).toInt()
                         onVolumeChange(clamped / 100f)

@@ -123,6 +123,7 @@ import me.weishu.kernelsu.ui.util.rememberContentReady
 import top.yukonga.miuix.kmp.utils.PagerNavigationSpringSpec
 import java.text.NumberFormat
 
+/** 仓库列表页（Material）：负责搜索、排序菜单、下拉刷新与加载/空态切换。 */
 @SuppressLint("LocalContextGetResourceValueCall")
 @Composable
 fun ModuleRepoScreenMaterial(
@@ -130,8 +131,10 @@ fun ModuleRepoScreenMaterial(
     actions: ModuleRepoActions,
 ) {
     val haptic = LocalHapticFeedback.current
+    // 主列表与搜索结果各用一份滚动状态，退出搜索后可回到原位置
     val listState = rememberLazyListState()
     val searchListState = rememberLazyListState()
+    // 下拉刷新计数用于强制列表回顶，不参与网络请求
     val refreshTick = remember { mutableIntStateOf(0) }
     val pullToRefreshState = rememberPullToRefreshState()
 
@@ -164,6 +167,7 @@ fun ModuleRepoScreenMaterial(
                         DropdownMenuPopup(expanded = showSortMenu, onDismissRequest = {
                             showSortMenu = false
                         }) {
+                            // 排序枚举与文案一一对应，选中项由 state.sortOrder 驱动
                             val sortOptions = listOf(
                                 RepoSort.UPDATED to R.string.module_repos_sort_updated,
                                 RepoSort.NAME to R.string.module_repos_sort_name,
@@ -197,6 +201,7 @@ fun ModuleRepoScreenMaterial(
                     }
                 },
                 searchContent = { _, closeSearch ->
+                    // 搜索关键字变化时回到顶部，避免命中项在屏幕外
                     val latestSearchResults = rememberUpdatedState(state.searchResults)
                     ScrollToTopOnChange(
                         searchListState,
@@ -208,6 +213,7 @@ fun ModuleRepoScreenMaterial(
                         listState = searchListState,
                         modifier = Modifier.fillMaxSize(),
                         onModuleClick = {
+                            // 点击搜索结果即离开搜索并进入详情
                             closeSearch()
                             actions.onOpenRepoDetail(it)
                         }
@@ -218,6 +224,7 @@ fun ModuleRepoScreenMaterial(
         contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal)
     ) { innerPadding ->
         val isLoading = state.modules.isEmpty()
+        // 进入页面时已有数据则跳过入场动画等待，避免缓存列表先闪空白
         val hadDataOnEntry = remember { state.modules.isNotEmpty() }
         val contentReady = hadDataOnEntry || rememberContentReady()
 
@@ -247,6 +254,7 @@ fun ModuleRepoScreenMaterial(
         if (!isLoading && contentReady) {
             val latestModules = rememberUpdatedState(state.modules)
             val latestRefreshing = rememberUpdatedState(state.isRefreshing)
+            // 排序变化或手动刷新时回到顶部；刷新中挂起避免滚动冲突
             ScrollToTopOnChange(
                 listState,
                 state.sortOrder,
@@ -288,6 +296,7 @@ fun ModuleRepoScreenMaterial(
 }
 
 
+/** 元模块、脚本与安装状态徽标；安装状态由 versionCode 对比得出。 */
 @Composable
 private fun RepoBadges(
     metamodule: Boolean,
@@ -334,6 +343,7 @@ private fun RepoBadges(
     }
 }
 
+/** 仓库模块列表；key 使用 moduleId，保证分页/刷新后条目状态稳定。 */
 @Composable
 private fun RepoModuleList(
     modules: List<RepoModule>,
@@ -354,6 +364,7 @@ private fun RepoModuleList(
             bottom = 16.dp + bottomPadding
         ),
     ) {
+        // 数据来自缓存时先提示，避免用户误以为看到的是最新索引
         if (stale) {
             item(key = "__notice_stale", contentType = "notice") {
                 Text(
@@ -366,8 +377,10 @@ private fun RepoModuleList(
         }
         items(modules, key = { it.moduleId }, contentType = { "module" }) { module ->
             val moduleAuthor = stringResource(id = R.string.module_author)
+            // 通过本地版本号与仓库版本号对比得到徽标状态
             val installState = repoInstallStateOf(module, installedVersions)
             val maxLinesLimit = LocalModuleDescriptionMaxLines.current
+            // 以模块 id 保存展开态，刷新列表后不会串状态
             var summaryExpanded by rememberSaveable(module.moduleId) { mutableStateOf(false) }
             var summaryCanExpand by rememberSaveable(module.moduleId) { mutableStateOf(true) }
 
@@ -415,6 +428,7 @@ private fun RepoModuleList(
                                     interactionSource = remember { MutableInteractionSource() },
                                     indication = null,
                                 ) {
+                                    // 摘要可展开时点击只展开；已完全展开则点击进入详情
                                     if (summaryCanExpand) {
                                         summaryExpanded = !summaryExpanded
                                     } else {
@@ -477,6 +491,7 @@ private fun RepoModuleList(
     }
 }
 
+/** 仓库详情页（Material）：顶部标题 + 三个分页（README / Releases / 信息）。 */
 @SuppressLint("StringFormatInvalid", "DefaultLocale")
 @Composable
 fun ModuleRepoDetailScreenMaterial(
@@ -486,7 +501,9 @@ fun ModuleRepoDetailScreenMaterial(
     val module = state.module
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // 安装与运行共用同一个确认按钮文案，按模块类型区分
     val confirmTitle = stringResource(if (state.isScript) R.string.script_run_title else R.string.module_install)
+    // 下载动作延迟到用户确认后再执行，避免误触直接产生流量
     var pendingDownload by remember { mutableStateOf<(() -> Unit)?>(null) }
     val confirmDialog = rememberConfirmDialog(onConfirm = { pendingDownload?.invoke() })
 
@@ -500,6 +517,7 @@ fun ModuleRepoDetailScreenMaterial(
                     TopBarBackButton(onClick = actions.onBack)
                 },
                 actions = {
+                    // 仅当 registry 提供 webUrl 时才显示“在浏览器打开”
                     if (state.webUrl.isNotEmpty()) {
                         IconButton(onClick = actions.onOpenWebUrl) {
                             Icon(
@@ -528,6 +546,7 @@ fun ModuleRepoDetailScreenMaterial(
                 modifier = Modifier.fillMaxSize(),
                 overscrollEffect = null,
             ) { page ->
+                // 分页内容需要额外让出顶栏与 tab 行高度；底部再叠加导航栏 inset
                 val paddedInnerPadding = PaddingValues(
                     top = innerPadding.calculateTopPadding() + 56.dp + 8.dp,
                     start = innerPadding.calculateStartPadding(layoutDirection),
@@ -555,6 +574,7 @@ fun ModuleRepoDetailScreenMaterial(
                         context = context,
                         setPendingDownload = { pendingDownload = it },
                         uriHandler = object : UriHandler {
+                            // 把 Markdown/README 中的链接交给页面统一打开，避免 WebView 内部跳转。
                             override fun openUri(uri: String) = actions.onOpenUrl(uri)
                         },
                     )
@@ -564,6 +584,7 @@ fun ModuleRepoDetailScreenMaterial(
                         innerPadding = paddedInnerPadding,
                         scrollBehavior = scrollBehavior,
                         uriHandler = object : UriHandler {
+                            // Info 页链接同样交给外部 URI 处理，保持与 README 一致。
                             override fun openUri(uri: String) = actions.onOpenUrl(uri)
                         },
                     )
@@ -590,6 +611,7 @@ fun ModuleRepoDetailScreenMaterial(
 @Composable
 private fun LazyItemScope.detailStatus(state: ModuleRepoDetailUiState, onRetry: () -> Unit): Boolean {
     when {
+        // 模块已从索引下架时优先提示，避免渲染过期详情
         state.notInIndex -> {
             Box(
                 modifier = Modifier
@@ -639,6 +661,7 @@ private fun CachedDetailNotice(modifier: Modifier = Modifier) {
     )
 }
 
+/** README 分页：渲染受限 markdown，并在加载完成前用淡入淡出过渡避免闪烁。 */
 @Composable
 private fun ReadmePage(
     state: ModuleRepoDetailUiState,
@@ -661,6 +684,7 @@ private fun ReadmePage(
             bottom = innerPadding.calculateBottomPadding(),
         ),
     ) {
+        // 详情来自缓存时给出提示，说明可能不是最新 README
         if (detail?.fromCache == true) {
             item(key = "__notice_cached", contentType = "notice") {
                 CachedDetailNotice(Modifier.padding(horizontal = 20.dp))
@@ -670,6 +694,7 @@ private fun ReadmePage(
             if (!detailStatus(state, onRetry) || detail == null) return@item
             val readmeHtml = detail.readmeHtml
             if (readmeHtml != null) {
+                // 以 html 为 key 重置加载标记，切换模块时不会沿用上一个 README 的状态
                 var loaded by remember(readmeHtml) { mutableStateOf(false) }
                 val alpha by animateFloatAsState(
                     targetValue = if (loaded) 1f else 0f,
@@ -726,6 +751,7 @@ private fun ReadmePage(
     }
 }
 
+/** Releases 分页：列出所有发布版本，并逐条渲染变更说明与下载入口。 */
 @Composable
 fun ReleasesPage(
     state: ModuleRepoDetailUiState,
@@ -754,6 +780,7 @@ fun ReleasesPage(
         ),
         verticalArrangement = Arrangement.spacedBy(13.dp),
     ) {
+        // 详情未就绪时只显示状态占位，避免渲染半截列表
         if (detail == null) {
             item { detailStatus(state, onRetry) }
             return@LazyColumn
@@ -765,6 +792,7 @@ fun ReleasesPage(
         }
         items(
             items = detail.releases,
+            // tag 在仓库内唯一，作为 key 可避免新增发布时复用错位的 item 状态
             key = { "release_${it.tag}" },
             contentType = { "release" }
         ) { rel ->
@@ -787,6 +815,7 @@ fun ReleasesPage(
                     rel.changelogHtml?.let { changelog ->
                         add {
                             SegmentedItemContainer {
+                                // 每个发布版本的变更说明独立加载，避免长列表一次性渲染
                                 val descReady = rememberContentReady()
                                 var descLoaded by remember(changelog) { mutableStateOf(false) }
                                 val descAlpha by animateFloatAsState(
@@ -859,6 +888,7 @@ fun ReleasesPage(
     }
 }
 
+/** 单个发布的下载/安装行：校验通过后按钮变为安装，下载中显示环形进度。 */
 @Composable
 private fun ReleaseZipSegmentedItem(
     release: RepoRelease,
@@ -871,9 +901,11 @@ private fun ReleaseZipSegmentedItem(
     onInstallModule: (Uri) -> Unit,
     setPendingDownload: ((() -> Unit)) -> Unit,
 ) {
+    // 以 zipUrl+sha256 记住句柄，返回页面后仍可复用已校验的下载结果
     val handle = rememberReleaseDownload(release)
     val onClickDownload = {
         val startText = context.getString(R.string.module_start_downloading, release.zipName)
+        // 把真正的下载动作挂到确认回调上，确认框只负责交互
         setPendingDownload { scope.startReleaseDownload(context, release, handle) }
         confirmDialog.showConfirm(title = confirmTitle, content = startText)
     }
@@ -911,6 +943,7 @@ private fun ReleaseZipSegmentedItem(
                     FilledTonalButton(
                         onClick = {
                             scope.launch {
+                                // 文件可能已被清理，使用前再次确认可用；失效则清掉缓存重下
                                 if (isDownloadAvailable(downloadedUri)) {
                                     onInstallModule(downloadedUri)
                                 } else {
@@ -962,6 +995,7 @@ private fun ReleaseZipSegmentedItem(
     )
 }
 
+/** 通用的“图标 + 文案 + 外链按钮”信息行；url 为空时不显示按钮。 */
 @Composable
 private fun InfoLinkItem(
     headline: String,
@@ -997,6 +1031,7 @@ private fun InfoLinkItem(
     )
 }
 
+/** 信息分页：展示下架/脚本上次运行/缓存等提示，以及作者、源码与各项元信息。 */
 @Composable
 fun InfoPage(
     state: ModuleRepoDetailUiState,
@@ -1006,6 +1041,7 @@ fun InfoPage(
 ) {
     val layoutDirection = LocalLayoutDirection.current
     val detail = state.detail
+    // 详情未加载时回退到列表页传入的作者信息，避免该页空白
     val authors = detail?.module?.authorList?.map { AuthorArg(it.name, it.link) } ?: state.module.authorsList
     LazyColumn(
         modifier = Modifier
